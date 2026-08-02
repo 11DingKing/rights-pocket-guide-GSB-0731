@@ -234,6 +234,7 @@ function parseManifestEntry(
   const packageVersion = readString(input, "packageVersion", problems);
   const url = readString(input, "url", problems);
   const sha256 = readString(input, "sha256", problems);
+  const signature = readString(input, "signature", problems);
   const kindRaw = input["kind"];
   if (kindRaw !== "full" && kindRaw !== "delta") {
     problems.push("manifest 条目 kind 必须是 full 或 delta");
@@ -243,7 +244,7 @@ function parseManifestEntry(
   }
   const kind = kindRaw as "full" | "delta";
   const rawSucceeds = input["succeeds"];
-  const entry: ManifestEntry = { packageVersion, url, sha256, kind };
+  const entry: ManifestEntry = { packageVersion, url, sha256, signature, kind };
   if (typeof rawSucceeds === "string" && rawSucceeds.length > 0) {
     entry.succeeds = rawSucceeds;
   }

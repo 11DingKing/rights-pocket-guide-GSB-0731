@@ -62,12 +62,14 @@ export interface ContentPackage {
   withdrawals: Readonly<Record<string, string>>;
 }
 
-// 更新清单（由 scripts/generate-manifest.mjs 生成，sha256 为下载校验权威值）。
+// 更新清单（由 scripts/generate-manifest.mjs 生成：sha256 为下载校验权威值，
+// signature 为对 sha256 的 ECDSA 签名，由随应用分发的公钥验证）。
 export interface ManifestEntry {
   packageVersion: string;
   url: string;
   sha256: string;
-  kind: "full" | "delta";
+  signature: string;
+  kind: 'full' | 'delta';
   succeeds?: string;
 }
 

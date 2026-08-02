@@ -8,13 +8,15 @@
 | 步骤 | 命令 | 预期结果 |
 | --- | --- | --- |
 | 安装依赖 | `npm install` | 安装 React/Vite/Vitest 等（无 UI 组件库、无检索库、无状态管理库） |
-| 自动化测试 | `npm test` | 5 个测试文件、45 个用例全部通过 |
+| 自动化测试 | `npm test` | 8 个测试文件、58 个用例全部通过 |
 | 类型检查 + 构建 | `npm run build` | `tsc --noEmit`（strict）零错误，Vite 产出 `dist/` |
-| 本地运行 | `npm run dev` | `predev` 生成 `public/materials/manifest.json`（真实 SHA-256），服务起于 `http://localhost:5173/` |
+| 本地运行 | `npm run dev` | `predev` 生成带真实 SHA-256 + ECDSA 签名的 `public/materials/manifest.json` |
 
 测试直接使用 `materials/content-pack-v1.json`（全量包）与 `materials/content-pack-v2.json`
 （增量包：REVISE / WITHDRAW→替代条目 / ADD）这两份真实 fixture；
-“更新服务器”由测试内的 manifest（真实 SHA-256）+ 可注入中断的下载器模拟。
+“更新服务器”由测试内的 manifest（真实 SHA-256 + 真实 ECDSA 签名）+
+可注入中断的下载器模拟；签名密钥为开发 fixture（`scripts/dev-signing-key.json`，
+公钥内置在 `src/services/signingKeys.ts` 作为信任锚）。
 
 ## 分层与约束（有自动化守护）
 
@@ -28,14 +30,20 @@
 
 内容按 `packageVersion` 整体切换，任何时候用户只看到“完整旧包”或“完整新包”：
 
-1. 更新管线七阶段：下载 → 校验（下载字节 SHA-256 对照清单权威值）→ 解析 →
-   物化（增量应用，`succeeds` 必须等于当前版本）→ 建索引（随包整体落库，不跨版本复用）→
-   暂存（`staged`）→ 原子切换。
+1. 更新管线八阶段：下载 → 哈希校验（下载字节 SHA-256 对照清单权威值）→
+   签名校验（清单签名是对 sha256 的 ECDSA P-256 签名，必须过应用内置公钥）→
+   解析 → 物化（增量应用，`succeeds` 必须等于当前版本）→ 建索引（随包整体落库，
+   不跨版本复用）→ 暂存（`staged`）→ 原子切换。
 2. 切换是**单个 IndexedDB 事务**：新包 `staged→active`、旧包 `active→retained`、
    激活指针翻转，三者同生同死；提交前崩溃/失败 ⇒ 事务回滚 ⇒ 旧版本完整。
-3. 启动引导：清理所有未激活的暂存包，只读 `active` 指针指向的完整记录；
+3. 并发控制（多标签页）：切换事务内先核对基线版本（乐观并发，不符即抛
+   `SwitchConflictError` 整体放弃）；暂存写入不覆盖已激活/保留的同版本记录；
+   落败方若发现目标版本已被对方提交，收敛为 `already-current` 并重载一致视图。
+4. 启动引导：清理所有未激活的暂存包，只读 `active` 指针指向的完整记录；
    指针损坏时回退到 `retained` 版本，再不行则用应用内捆绑的种子包（v1）重新播种。
-4. 阅读设置存放在独立的 `settings` 仓，不参与内容包事务，跨版本保留。
+5. 阅读设置存放在独立的 `settings` 仓，不参与内容包事务，跨版本保留。
+6. 不存在“分块存储”：内容包与索引作为**整条 staged 记录**原子写入；
+   视图/搜索/深链接只读 `active` 记录，staged 残留天然不可见（有专项测试）。
 
 ## 离线更新与回滚证据
 
@@ -44,14 +52,19 @@
 | 首次启动完全离线 | 捆绑种子包播种，渲染完整 v1（主题/检索可用） | updateFlow › 首次离线启动；ui › 首次离线启动（UI） |
 | 下载清单中断 | `failed@download`，继续完整使用 v1 | updateFlow › 下载清单中断 |
 | 下载内容包字节中断 | `failed@download`，继续完整使用 v1 | updateFlow › 下载内容包字节中断 |
+| 清单缺少签名字段 | `failed@download`（解析拒绝），旧包完整 | signature › 清单缺少签名字段 |
 | 字节被篡改（SHA-256 不匹配） | `failed@checksum`，继续完整使用 v1 | updateFlow › 校验和不匹配；core › 字节被篡改时校验失败 |
+| 攻击者换钥重签清单 | `failed@signature`（信任锚不通过），旧包完整 | signature › 攻击者换钥重签清单 |
+| 签名对象被篡改 | `failed@signature`，旧包完整 | signature › 签名对象被篡改 |
 | 包体非法 JSON | `failed@parse`，继续完整使用 v1 | updateFlow › 包体非法 JSON |
 | 增量基线 `succeeds` 不匹配 | `failed@materialize`，拒绝跨版本混合 | updateFlow › 增量基线不匹配；core › succeeds 与当前版本不一致时拒绝物化 |
 | 索引构建中断 | `failed@index`，继续完整使用 v1 | indexFailure › 建索引崩溃 |
 | IndexedDB 配额不足（暂存写入抛 `QuotaExceededError`） | 映射为“存储空间不足”，`failed@staging`，旧包完整、无残留 | updateFlow › IndexedDB 配额不足（暂存阶段）；错误映射 › QuotaExceededError 映射 |
 | 切换事务提交前崩溃 | `failed@switch`，重启后旧包完整、暂存被清理 | updateFlow › 切换事务提交前崩溃 |
 | 进程在“暂存完成、切换未发生”之间崩溃 | 重启后只见完整旧包，暂存包被启动引导清理 | updateFlow › 进程在暂存完成、切换未发生之间崩溃 |
-| 更新成功 | 七阶段按序发生，切换后为完整 v2，旧版进入 `retained` | updateFlow › 更新成功路径（断言阶段序列与完整 v2） |
+| 失败版本的暂存包+索引残留在库中 | 搜索/深链接/法条索引仍只读激活版本；重启后残留被清理 | isolation › 暂存包及其索引物理存在时仍只读激活版本 |
+| 两个标签页同时更新 | 只有一个提交成功（基线乐观并发），另一方收敛 `already-current`；双方最终同为完整 v2，无暂存残留 | multiTab › 并发更新；基线校验；迟到的暂存写入不覆盖 |
+| 更新成功 | 八阶段按序发生，切换后为完整 v2，旧版进入 `retained` | updateFlow › 更新成功路径（断言阶段序列与完整 v2） |
 | 已是最新 | 不重复安装 | updateFlow › 已经是最新版本时不重复安装 |
 | 手动回滚 | 单事务交换 `active/retained`，回到完整旧版本；无可回滚版本时为空操作 | updateFlow › 回滚；ui › 回滚（UI） |
 | 完整性判定方式 | 失败后激活包与 v1 物化结果**深度相等**（非抽样） | helpers.expectCompleteV1 / expectCompleteV2 被上述全部用例调用 |
@@ -60,10 +73,13 @@
 
 | 保证 | 机制 | 自动化测试证据 |
 | --- | --- | --- |
-| 全文检索排序跨版本确定 | 自研 CJK 二元切分 + 词权重（标题 3 / 法条 2 / 正文 1），得分相同按 articleId 升序；索引随包落库 | core › 检索（确定性重建、排序、tie-break、AND 语义）；updateFlow › 失败后的确定性行为 |
-| 撤下条目替代深链接跨版本确定 | 撤下链在物化时归一化到最终有效条目；v1 直达、v2 跳转、回滚后再次直达 | updateFlow › 撤下条目的替代深链接跨版本确定；ui › 撤下条目深链接 |
+| 全文检索排序跨版本确定 | 自研 CJK 二元切分 + 词权重（标题 3 / 法条 2 / 正文 1），得分相同按 articleId 升序；索引随包落库 | core › 检索（确定性重建、排序、tie-break、AND 语义）；isolation › 同一查询在两个版本中的排序 |
+| v1/v2 相同查询排序对比 | v1 `上门服务`→[ART-AID-2]；v2 →[ART-SERVICE-3]；未受影响查询（公证）跨版本逐位一致 | isolation › 同一查询在两个版本中的排序各自确定 |
+| 撤下条目替代深链接跨版本确定 | 撤下链在物化时归一化到最终有效条目；v1 无映射、v2 `ART-AID-2→ART-SERVICE-3`、回滚后恢复 | isolation › 撤下替代关系按版本确定；updateFlow › 替代深链接跨版本确定；ui › 撤下条目深链接 |
+| 离线重启后的可见集合完整确定 | 只读 active 记录；成功后重启 = 完整 v2 集合；失败后重启 = 完整 v1 集合；重复重启逐位相同 | isolation › 更新成功后离线重启 / 更新失败后离线重启 |
 | 阅读设置跨版本保持 | 独立 `settings` 仓，不随内容包事务变化 | updateFlow › 阅读设置存放在独立仓；ui › 阅读设置跨版本保持 |
 | 焦点恢复跨版本确定 | 路由切换聚焦主标题；更新/回滚完成后焦点恢复到当前页主标题；撤下跳转后焦点落在替代条目标题 | ui › 更新成功 / 撤下条目深链接 / 回滚（UI）中的 `toHaveFocus()` 断言 |
+| 多标签页结果确定 | 恰好一方 `updated`，另一方 `already-current`；库中仅一份完整 active v2 | multiTab › 并发更新 |
 
 ## 键盘路径证据
 
@@ -97,6 +113,6 @@
 
 | 步骤 | 结果 |
 | --- | --- |
-| 打开 `http://localhost:5173/` | 首屏渲染：跳转链接、主导航（aria-current）、主题列表、版本徽标 `当前版本 2026.07.31` |
-| 点击“检查更新” | 页面出现 `2026.09.01`（下载→真实 SHA-256 校验→原子切换成功） |
+| 打开 `http://localhost:5174/` | 首屏渲染：跳转链接、主导航（aria-current）、主题列表、版本徽标 `当前版本 2026.07.31` |
+| 点击“检查更新” | 页面出现 `已更新到 2026.09.01`（下载 → 真实 SHA-256 → 真实 ECDSA 签名校验 → 原子切换成功） |
 | 访问 `#/article/ART-AID-2` | 地址被替换为 `#/article/ART-SERVICE-3`（撤下条目深链接迁移生效） |

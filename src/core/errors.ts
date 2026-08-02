@@ -2,6 +2,7 @@
 export type UpdateStage =
   | "download"
   | "checksum"
+  | "signature"
   | "parse"
   | "materialize"
   | "index"
@@ -36,5 +37,22 @@ export class StorageQuotaError extends Error {
   constructor(message = "IndexedDB 存储空间不足") {
     super(message);
     this.name = "StorageQuotaError";
+  }
+}
+
+export class InvalidSignatureError extends Error {
+  constructor(message = "内容包签名无效") {
+    super(message);
+    this.name = "InvalidSignatureError";
+  }
+}
+
+/** 切换事务提交时发现基线版本已变化（另一个标签页/流程抢先提交）。 */
+export class SwitchConflictError extends Error {
+  constructor(expectedBase: string, actualActive: string | null) {
+    super(
+      `版本冲突：本次更新基于 ${expectedBase}，但当前激活版本已是 ${actualActive ?? "无"}，放弃提交`
+    );
+    this.name = "SwitchConflictError";
   }
 }

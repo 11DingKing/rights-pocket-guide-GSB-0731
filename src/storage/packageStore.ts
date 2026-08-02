@@ -1,5 +1,6 @@
 import type { ContentPackage } from "../core/types";
 import type { SearchIndex } from "../core/search";
+import { SwitchConflictError } from "../core/errors";
 import { mapIdbError, requestToPromise, runInTransaction } from "./idb";
 import {
   META_ACTIVE_VERSION,
@@ -95,7 +96,10 @@ export class PackageStore {
     return asStoredPackage(value);
   }
 
-  /** 暂存：完整写入新包（含索引），状态 staged。此刻激活指针不变。 */
+  /**
+   * 暂存：完整写入新包（含索引），状态 staged。此刻激活指针不变。
+   * 并发守卫：同版本记录已是 active/retained 时不覆盖（另一标签页可能已提交）。
+   */
   async stagePackage(record: StoredPackage): Promise<void> {
     const staged: StoredPackage = { ...record, status: "staged" };
     await runInTransaction(
@@ -103,7 +107,14 @@ export class PackageStore {
       [STORE_PACKAGES],
       "readwrite",
       async (tx) => {
-        await requestToPromise(tx.objectStore(STORE_PACKAGES).put(staged));
+        const store = tx.objectStore(STORE_PACKAGES);
+        const existing = asStoredPackage(
+          await requestToPromise(store.get(record.version)),
+        );
+        if (existing !== undefined && existing.status !== "staged") {
+          return;
+        }
+        await requestToPromise(store.put(staged));
       },
     );
   }
@@ -111,9 +122,12 @@ export class PackageStore {
   /**
    * 原子切换：单个事务内完成 —— 新包 staged→active、旧包 active→retained、
    * 激活指针翻转。提交前崩溃/失败 ⇒ 事务回滚 ⇒ 旧版本完整保留。
+   * 乐观并发：事务内先核对 expectedBaseVersion；若已被其他标签页抢先提交，
+   * 抛 SwitchConflictError，本次提交整体放弃。
    */
   async activateStaged(
     version: string,
+    expectedBaseVersion: string | null,
   ): Promise<{ previousVersion: string | null }> {
     return runInTransaction(
       this.db,
@@ -122,17 +136,23 @@ export class PackageStore {
       async (tx) => {
         const packages = tx.objectStore(STORE_PACKAGES);
         const meta = tx.objectStore(STORE_META);
+        const currentRaw = await requestToPromise(
+          meta.get(META_ACTIVE_VERSION),
+        );
+        const currentVersion =
+          typeof currentRaw === "string" ? currentRaw : null;
+        if (currentVersion !== expectedBaseVersion) {
+          throw new SwitchConflictError(
+            expectedBaseVersion ?? "无",
+            currentVersion,
+          );
+        }
         const staged = asStoredPackage(
           await requestToPromise(packages.get(version)),
         );
         if (staged === undefined || staged.status !== "staged") {
           throw new Error(`没有可激活的暂存包 ${version}`);
         }
-        const currentRaw = await requestToPromise(
-          meta.get(META_ACTIVE_VERSION),
-        );
-        const currentVersion =
-          typeof currentRaw === "string" ? currentRaw : null;
         if (currentVersion !== null && currentVersion !== version) {
           const current = asStoredPackage(
             await requestToPromise(packages.get(currentVersion)),

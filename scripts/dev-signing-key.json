@@ -1,0 +1,16 @@
+{
+  "comment": "开发环境 fixture 签名密钥（ECDSA P-256）。仅用于本地内容包签名演示，严禁用于生产。公钥同步硬编码于 src/services/signingKeys.ts。",
+  "publicJwk": {
+    "kty": "EC",
+    "x": "9zBCx8-3q1VFKZwnSZ5gpf0_8eiPpMrps5MQz4tg5oI",
+    "y": "u0xHavcAj4P9cM-oTOmlWYctSJbNu5kvy1Hp0Jmpabw",
+    "crv": "P-256"
+  },
+  "privateJwk": {
+    "kty": "EC",
+    "x": "9zBCx8-3q1VFKZwnSZ5gpf0_8eiPpMrps5MQz4tg5oI",
+    "y": "u0xHavcAj4P9cM-oTOmlWYctSJbNu5kvy1Hp0Jmpabw",
+    "crv": "P-256",
+    "d": "_EkFQitTkShdWn-DCw4C_QodIdGMiLXCbHrX-zLQyyg"
+  }
+}

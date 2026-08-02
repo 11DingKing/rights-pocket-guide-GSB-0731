@@ -47,7 +47,7 @@ describe("首次离线启动", () => {
 });
 
 describe("更新成功路径", () => {
-  it("依次经过七个阶段，切换后是完整 v2，检索与深链接随之切换", async () => {
+  it("依次经过八个阶段，切换后是完整 v2，检索与深链接随之切换", async () => {
     const store = await seededStore();
     const channel = defaultChannel();
     const stages: UpdateStage[] = [];
@@ -64,6 +64,7 @@ describe("更新成功路径", () => {
     expect(stages).toEqual([
       "download",
       "checksum",
+      "signature",
       "parse",
       "materialize",
       "index",

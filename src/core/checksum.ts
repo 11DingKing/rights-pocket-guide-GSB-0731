@@ -4,6 +4,11 @@ export function textToBytes(text: string): Uint8Array {
   return new TextEncoder().encode(text);
 }
 
+/** 取 Uint8Array 对应的精确 ArrayBuffer 切片（供 WebCrypto 使用）。 */
+export function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+}
+
 function toHex(buffer: ArrayBuffer): string {
   const bytes = new Uint8Array(buffer);
   let hex = "";

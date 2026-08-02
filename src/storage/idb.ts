@@ -44,29 +44,35 @@ export function runInTransaction<T>(
   db: IDBDatabase,
   storeNames: string[],
   mode: IDBTransactionMode,
-  fn: (tx: IDBTransaction) => Promise<T>,
+  fn: (tx: IDBTransaction) => Promise<T>
 ): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const tx = db.transaction(storeNames, mode);
     let fnResult: Promise<T> | null = null;
+    // fn 主动抛出的错误优先于 abort/error 事件（避免被 AbortError 掩盖）。
+    let fnError: unknown = null;
 
     tx.oncomplete = () => {
       if (fnResult !== null) {
         fnResult.then(resolve, reject);
       } else {
-        reject(new Error("事务完成但未产生结果"));
+        reject(new Error('事务完成但未产生结果'));
       }
     };
-    tx.onerror = () => reject(mapIdbError(tx.error));
+    tx.onerror = () =>
+      reject(fnError !== null ? mapIdbError(fnError) : mapIdbError(tx.error));
     tx.onabort = () =>
       reject(
-        mapIdbError(tx.error ?? new DOMException("事务中止", "AbortError")),
+        fnError !== null
+          ? mapIdbError(fnError)
+          : mapIdbError(tx.error ?? new DOMException('事务中止', 'AbortError'))
       );
 
     try {
       fnResult = fn(tx);
-      fnResult.catch(() => {
+      fnResult.catch((error: unknown) => {
         // fn 失败时主动中止，确保不会提交半套写入。
+        fnError = error;
         try {
           tx.abort();
         } catch {

@@ -48,6 +48,7 @@ export interface RepositoryDeps {
   settingsStore: SettingsStore;
   fetchText: (url: string) => Promise<string>;
   digest?: (bytes: Uint8Array) => Promise<string>;
+  publicKey?: JsonWebKey;
   now?: () => string;
 }
 
@@ -222,6 +223,9 @@ export class Repository {
         fetchText: this.deps.fetchText,
         store: this.deps.store,
         ...(this.deps.digest !== undefined ? { digest: this.deps.digest } : {}),
+        ...(this.deps.publicKey !== undefined
+          ? { publicKey: this.deps.publicKey }
+          : {}),
         ...(this.deps.now !== undefined ? { now: this.deps.now } : {}),
       });
       if (result.status === "updated") {
@@ -229,8 +233,11 @@ export class Repository {
         this.previousVersion = await this.deps.store.getPreviousVersion();
         this.updateStatus = "updated";
         this.updateMessage = result.toVersion;
-      } else if (result.status === "already-current") {
-        this.updateStatus = "already-current";
+      } else if (result.status === 'already-current') {
+        // 可能刚被其他标签页抢先提交：重载激活包以收敛到一致视图。
+        this.active = await this.deps.store.readConsistentActive();
+        this.previousVersion = await this.deps.store.getPreviousVersion();
+        this.updateStatus = 'already-current';
         this.updateMessage = result.activeVersion;
       } else {
         this.active = await this.deps.store.readConsistentActive();

@@ -1,17 +1,19 @@
 {
-  "generatedAt": "2026-08-02T05:33:03.751Z",
+  "generatedAt": "2026-08-02T07:04:35.471Z",
   "latest": "2026.09.01",
   "packages": [
     {
       "packageVersion": "2026.07.31",
       "url": "materials/content-pack-v1.json",
       "sha256": "47e7f8925075cefd8d4110d6ebc1d912248964421f24c1823740dc5140579fbc",
+      "signature": "YT5ty3i15QqPcABLyr07udWY108uPPJJFg8Mr/mR1nXphqG5fzHf/ci06R4h8gM+KQzY0DpHi2UlAwksItX44g==",
       "kind": "full"
     },
     {
       "packageVersion": "2026.09.01",
       "url": "materials/content-pack-v2.json",
       "sha256": "c85f99b42ebbadd52c3bf005dbfc736218363c776cd602837e0055fb8d91d465",
+      "signature": "y3+O7SX6A4uq/b5B37HAdN++S63/omv8C6YsjLyw2hRDf1j4BdlJNn7cS0VkxBRApxCjd5UfSgMLQibs4f6KBw==",
       "kind": "delta",
       "succeeds": "2026.07.31"
     }
