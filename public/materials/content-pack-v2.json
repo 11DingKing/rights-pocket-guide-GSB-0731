@@ -1,0 +1,11 @@
+{
+  "packageVersion": "2026.09.01",
+  "succeeds": "2026.07.31",
+  "changes": [
+    {"kind": "REVISE", "articleId": "ART-AID-1", "title": "无固定生活来源的法援核查规则", "body": "无固定生活来源的残疾人依法免予核查经济困难状况。"},
+    {"kind": "WITHDRAW", "articleId": "ART-AID-2", "replacementArticleId": "ART-SERVICE-3"},
+    {"kind": "ADD", "topicId": "TOPIC-AID", "articleId": "ART-SERVICE-3", "title": "行动不便时的上门服务", "body": "行动不便时可了解热线、网络和上门服务说明。", "legalRef": "公共法律服务规范 2026"}
+  ],
+  "checksum": "fixture-sha256-v2",
+  "failureCases": ["download interrupted before checksum", "checksum mismatch", "IndexedDB quota exceeded during staging"]
+}
