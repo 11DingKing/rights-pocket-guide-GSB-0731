@@ -1,0 +1,12 @@
+{
+  "packageVersion": "2026.07.31",
+  "topics": [
+    {"id": "TOPIC-AID", "title": "法律援助", "articleIds": ["ART-AID-1", "ART-AID-2"]},
+    {"id": "TOPIC-NOTARY", "title": "公证费用减免", "articleIds": ["ART-NOTARY-1"]}
+  ],
+  "articles": [
+    {"id": "ART-AID-1", "title": "无固定生活来源免予经济困难核查", "body": "符合条件的残疾人可依法免予核查。", "legalRef": "法律援助法"},
+    {"id": "ART-AID-2", "title": "行动不便时的服务方式", "body": "可以了解热线、网络和上门服务渠道。", "legalRef": "公共法律服务规范"},
+    {"id": "ART-NOTARY-1", "title": "公证费用减免", "body": "符合条件时可申请费用减免。", "legalRef": "公证服务规范"}
+  ]
+}
