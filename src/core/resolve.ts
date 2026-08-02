@@ -211,21 +211,32 @@ function resolveRedirect(
   }
 }
 
+/** Outcome of following a deep-link redirect chain. */
+export type RedirectResolution =
+  | { readonly kind: 'resolved'; readonly targetId: string; readonly migrated: boolean }
+  | { readonly kind: 'unknown' }
+  | { readonly kind: 'cycle' };
+
 /**
  * Follow redirects for a requested article id to a terminal, live article id.
- * Returns `undefined` when the id is unknown. Used by the view layer for
- * deep-link migration.
+ * Used by the view layer for deep-link migration. Distinguishes three
+ * outcomes so the UI can render an accessible degraded state:
+ *  - `resolved`: reached a live article (with `migrated` telling whether a
+ *    withdrawn id was followed);
+ *  - `cycle`: the replacement chain loops (defensive — install-time resolution
+ *    already rejects cyclic packs, but the view degrades gracefully anyway);
+ *  - `unknown`: the id (or its chain end) is not a live article.
  */
 export function followRedirect(
   snapshot: ResolvedSnapshot,
   articleId: string,
-): { readonly targetId: string; readonly migrated: boolean } | undefined {
+): RedirectResolution {
   const seen = new Set<string>();
   let cursor = articleId;
   let migrated = false;
   while (snapshot.redirects[cursor] !== undefined) {
     if (seen.has(cursor)) {
-      return undefined;
+      return { kind: 'cycle' };
     }
     seen.add(cursor);
     const next = snapshot.redirects[cursor];
@@ -236,7 +247,7 @@ export function followRedirect(
     migrated = true;
   }
   if (snapshot.articles[cursor] === undefined) {
-    return undefined;
+    return { kind: 'unknown' };
   }
-  return { targetId: cursor, migrated };
+  return { kind: 'resolved', targetId: cursor, migrated };
 }

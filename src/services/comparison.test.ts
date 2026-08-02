@@ -97,6 +97,7 @@ describe('v1 vs v2 comparison', () => {
     // v1: ART-AID-2 is a live article, no migration.
     const link1 = a.repo.resolveDeepLink('ART-AID-2');
     expect(link1).toEqual({
+      kind: 'resolved',
       articleId: 'ART-AID-2',
       migrated: false,
       requestedId: 'ART-AID-2',
@@ -106,6 +107,7 @@ describe('v1 vs v2 comparison', () => {
     const link2a = b.repo.resolveDeepLink('ART-AID-2');
     const link2b = b.repo.resolveDeepLink('ART-AID-2');
     expect(link2a).toEqual({
+      kind: 'resolved',
       articleId: 'ART-SERVICE-3',
       migrated: true,
       requestedId: 'ART-AID-2',

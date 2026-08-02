@@ -52,12 +52,20 @@ describe('parse + resolve of the shipped material packs', () => {
       parsePackageText(v2Text),
     ]);
     const migrated = followRedirect(snapshot, 'ART-AID-2');
-    expect(migrated).toEqual({ targetId: 'ART-SERVICE-3', migrated: true });
+    expect(migrated).toEqual({
+      kind: 'resolved',
+      targetId: 'ART-SERVICE-3',
+      migrated: true,
+    });
 
     const direct = followRedirect(snapshot, 'ART-AID-1');
-    expect(direct).toEqual({ targetId: 'ART-AID-1', migrated: false });
+    expect(direct).toEqual({
+      kind: 'resolved',
+      targetId: 'ART-AID-1',
+      migrated: false,
+    });
 
-    expect(followRedirect(snapshot, 'ART-UNKNOWN')).toBeUndefined();
+    expect(followRedirect(snapshot, 'ART-UNKNOWN')).toEqual({ kind: 'unknown' });
   });
 
   it('rejects a delta whose succeeds does not match', () => {

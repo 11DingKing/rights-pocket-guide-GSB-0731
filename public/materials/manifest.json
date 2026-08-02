@@ -1,20 +1,20 @@
 {
-  "generatedAt": "2026-08-02T10:13:13.699Z",
+  "generatedAt": "2026-08-02T11:04:01.944Z",
   "latest": "2026.09.01",
-  "publicKey": "MCowBQYDK2VwAyEAD3frkzDq2CD7MunYK0GVYTyOZIZcBamhzB6auWTD1BM=",
+  "publicKey": "MCowBQYDK2VwAyEA2me+nSck5opDyo8OVNCJOB45l6mOWQBiugxYbJvVkzo=",
   "packages": [
     {
       "packageVersion": "2026.07.31",
       "url": "materials/content-pack-v1.json",
       "sha256": "47e7f8925075cefd8d4110d6ebc1d912248964421f24c1823740dc5140579fbc",
-      "signature": "D5GE7uzm6wsk4+S5c6yGngJoHKyGnhltk9dEe8aik171yXA7fkxs17vtpezGuoczHiCfVEdCyt5N7TUaEndaAw==",
+      "signature": "3qT+FHcJLS5xaNrIS6GjWqmdQ2D5WIaPkFhGbhOSS5ImrXZKuyVAgmkZleZMLDKCPhhhl8OWLzvKqcIbdH8lCw==",
       "kind": "full"
     },
     {
       "packageVersion": "2026.09.01",
       "url": "materials/content-pack-v2.json",
       "sha256": "c85f99b42ebbadd52c3bf005dbfc736218363c776cd602837e0055fb8d91d465",
-      "signature": "ntjHIGrblvQLwbtRJLrLFGixViwhP8R3kJWuYgO1pq3N6obqm/I6iUCPWpmwpDpNNcDBAP4wE6yLyBTBPrZ+Ag==",
+      "signature": "e8s03nU1PJioxj9I5DWdGBkgyCtEVRPZNUvzFoQ1b5y80wmFJlWz7AkeGdtL5rEpBwQGBzJoXuYlWap9Ba/8Bw==",
       "kind": "delta",
       "succeeds": "2026.07.31"
     }

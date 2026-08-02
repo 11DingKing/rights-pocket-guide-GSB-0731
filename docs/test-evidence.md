@@ -4,12 +4,12 @@ All evidence below is produced by automated tests. Reproduce the whole matrix
 with:
 
 ```bash
-npm test          # vitest run — 40 tests, all green
+npm test          # vitest run — 47 tests, all green
 npm run build     # tsc -b (strict) + vite build
 npm run dev       # manual smoke at http://localhost:5173
 ```
 
-Latest run: **40 passed (7 files)**. Type-check (`tsc -b`) passes with `strict`,
+Latest run: **47 passed (9 files)**. Type-check (`tsc -b`) passes with `strict`,
 `noUncheckedIndexedAccess`, and `exactOptionalPropertyTypes`; the source
 contains no `any` and no non-null assertions.
 
@@ -128,7 +128,38 @@ Computed only from the committed active package, identically on every run.
 
 ---
 
-## 7. Determinism across versions
+## 7. Settings schema upgrade coupled to the package switch
+
+The reading-settings schema is versioned (schema 1 ships with base `2026.07.31`;
+schema 2 adds `underlineLinks` and ships with `2026.09.01`). Migration commits in
+the **same IndexedDB transaction** as the package + pointer (`promoteStaged`
+writes the migrated settings record last, so its failure rolls back the whole
+switch). A forced restart therefore lands on {old package + old settings} or
+{new package + new settings}, never a cross-version mix.
+
+| Scenario | Expected | Evidence (test) |
+|----------|----------|-----------------|
+| Interrupt at commit while migrating settings | restart → active `2026.07.31`, settings schema `1`, old `fontScale` preserved, no v2 content | `settingsSchema.test.ts › interrupting settings migration mid-commit keeps old package AND old settings` |
+| Successful switch | restart → active `2026.09.01`, settings schema `2`, valid prefs carried over, new field defaulted | `settingsSchema.test.ts › a successful switch commits new package AND schema-2 settings together` |
+| Migration helpers | pure & total: down-migrate drops schema-2 field, up-migrate keeps valid values, invalid input never throws | `settingsSchema.test.ts › coerce/migrate helpers are pure and total` |
+
+---
+
+## 8. Accessible degraded states (never lose the last usable settings)
+
+| Trigger | Degraded behaviour | Evidence (test) |
+|---------|--------------------|-----------------|
+| Withdrawn deep link | focus retained on destination `<h1>`; visible "内容已更新" notice (icon+text); SR announces "内容已更新，已跳转到替代条目…" | `ArticleView.test.tsx › retains focus on the heading, shows replacement, and announces 内容已更新` |
+| Cyclic replacement chain | `role="alert"` heading "内容暂时无法打开", warn badge (icon+text), reassures settings unaffected, SR announced; never blank/crash | `ArticleView.test.tsx › renders a stable accessible degraded state for a cyclic replacement chain` |
+| Invalid stored preference | `loadSettings` coerces to last-usable/defaults, never throws, flags `valid=false` for the UI status badge | `settingsSchema.test.ts › invalid stored preferences fall back to the last usable value` |
+| IndexedDB quota on save | in-memory setting still applies; last successfully persisted settings intact; status → `quota` | `settingsSchema.test.ts › quota on save keeps the last usable settings intact` |
+
+Degraded status is surfaced in `SettingsView` as a `StatusBadge` (icon glyph +
+text, never colour alone) and announced via the live region.
+
+---
+
+## 9. Determinism across versions
 
 | Property | Expected | Evidence (test) |
 |----------|----------|-----------------|
@@ -140,7 +171,7 @@ Computed only from the committed active package, identically on every run.
 
 ---
 
-## 8. Reproducing the whole flow manually
+## 10. Reproducing the whole flow manually
 
 1. `npm install`
 2. `npm run dev` and open `http://localhost:5173`.

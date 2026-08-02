@@ -112,18 +112,39 @@ export interface SearchHit {
   readonly score: number;
 }
 
-/** Reading preferences persisted independently of any content package. */
+/**
+ * Reading preferences persisted independently of any content package. The
+ * settings *schema* is versioned and coupled to the content package: schema 1
+ * ships with the base package (2026.07.31); schema 2 (adds `underlineLinks`)
+ * ships with 2026.09.01. Migration between schemas commits atomically with the
+ * package switch so a forced restart can only land on {old package + schema-1
+ * settings} or {new package + schema-2 settings}, never a cross-version mix.
+ */
 export interface ReadingSettings {
   readonly fontScale: 'normal' | 'large' | 'xlarge';
   readonly contrast: 'normal' | 'high';
   readonly lineSpacing: 'normal' | 'loose';
+  /** Schema 2 addition. Present in every in-memory value; ignored by schema 1. */
+  readonly underlineLinks: 'on' | 'off';
 }
 
 export const DEFAULT_READING_SETTINGS: ReadingSettings = {
   fontScale: 'normal',
   contrast: 'normal',
   lineSpacing: 'normal',
+  underlineLinks: 'on',
 };
+
+/** Latest known settings schema version. */
+export const CURRENT_SETTINGS_SCHEMA = 2;
+
+/**
+ * Which settings schema a given content package version expects. Reused across
+ * rounds: the round-1 base uses schema 1, the round-2 delta uses schema 2.
+ */
+export function settingsSchemaForPackage(packageVersion: string): number {
+  return packageVersion === '2026.07.31' ? 1 : 2;
+}
 
 /** What the storage layer persists per package version. */
 export interface StoredPackage {

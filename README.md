@@ -70,6 +70,17 @@ copy. Exactly one version commits; the loser's staged chunks/index/temp metadata
 are never reachable. A restart always shows a complete old package **or** a
 complete new package — never a mix.
 
+The **reading-settings schema** is versioned and coupled to the switch: schema 1
+ships with the base package, schema 2 (adds `underlineLinks`) ships with the
+delta. `promoteStaged` writes the migrated settings record in the *same*
+transaction as the package + pointer (written last, so its failure rolls the
+whole switch back). A forced restart therefore lands on {old package + old
+settings} or {new package + new settings}, never a cross-version mix. Invalid
+stored preferences are coerced to the last usable value (never thrown away), a
+cyclic replacement chain renders an accessible `role="alert"` degraded state,
+and a quota failure on save keeps the last usable settings — each surfaced with
+a text+icon status badge and a live-region announcement.
+
 Packages are verified twice before staging: **sha256** (corruption/truncation)
 and **Ed25519 signature** against a public key pinned in the manifest and the
 bundled seed (tampering). `scripts/build-manifest.mjs` signs each pack at build

@@ -26,7 +26,7 @@ export function App({
   usedBundledSeed,
 }: AppProps): JSX.Element {
   const { route, navigate } = useHashRoute();
-  const { settings, update } = useReadingSettings(repository);
+  const { settings, update, status } = useReadingSettings(repository);
 
   const upToDate =
     updateError === undefined && activeVersion === latestAttempted;
@@ -110,7 +110,12 @@ export function App({
           />
         ) : null}
         {route.name === 'settings' ? (
-          <SettingsView settings={settings} update={update} />
+          <SettingsView
+            settings={settings}
+            update={update}
+            status={status}
+            schemaVersion={repository.settingsSchema}
+          />
         ) : null}
       </main>
     </>

@@ -25,10 +25,16 @@
 import { buildIndex } from '../core/search/index';
 import { constantTimeEquals, sha256Hex } from '../core/checksum';
 import { parsePackageText } from '../core/parse';
+import { coerceSettings, migrateSettings, normalizeSchema } from '../core/readingSettings';
 import { resolveChain } from '../core/resolve';
 import { importVerifyKey, verifySignature } from '../core/signing';
 import type { ParsedPackage, StoredPackage } from '../core/types';
-import { StalePromotionError, type PackageStore } from '../storage/packageStore';
+import { DEFAULT_READING_SETTINGS, settingsSchemaForPackage } from '../core/types';
+import {
+  StalePromotionError,
+  type PackageStore,
+  type StoredSettings,
+} from '../storage/packageStore';
 import type { TextFetcher } from './fetcher';
 import { chainTo, parseManifestText, type Manifest } from './manifest';
 
@@ -228,12 +234,33 @@ export async function updateTo(
   }
 
   // 8. commit — promote staged → active with a compare-and-set on the active
-  // pointer. If another tab already advanced the pointer, this loses the race
-  // and aborts; the staged copy is pruned so it can never be read. Quota or
-  // interruption here rolls back the promotion transaction.
+  // pointer, AND migrate the reading-settings schema to the target package's
+  // schema in the SAME transaction. If another tab advanced the pointer, this
+  // loses the race and aborts; the staged copy is pruned. Quota or interruption
+  // here rolls back the promotion — package, pointer, and settings together —
+  // so a restart never sees {new package + old settings} or the reverse.
   await runStage(deps.stageHook, 'commit');
+
+  // Compute the migrated settings from whatever is currently persisted. Invalid
+  // stored data degrades to defaults without ever throwing, so a bad preference
+  // cannot block the switch or lose the last usable settings silently.
+  const targetSchema = settingsSchemaForPackage(snapshot.packageVersion);
+  const rawSettings = await deps.store.getRawSettings();
+  const base = coerceSettings(
+    rawSettings?.value,
+    DEFAULT_READING_SETTINGS,
+  ).settings;
+  const migratedSettings: StoredSettings = {
+    value: migrateSettings(base, targetSchema),
+    schemaVersion: normalizeSchema(targetSchema),
+  };
+
   try {
-    await deps.store.promoteStaged(snapshot.packageVersion, previousActive);
+    await deps.store.promoteStaged(
+      snapshot.packageVersion,
+      previousActive,
+      migratedSettings,
+    );
   } catch (cause) {
     // Whether we lost the race or hit quota, drop our staged copy so nothing
     // half-written is ever reachable. Pruning failures are non-fatal.

@@ -25,7 +25,6 @@
  * and a restart shows a complete old package or a complete new package.
  */
 import type { ReadingSettings, StoredPackage } from '../core/types';
-import { DEFAULT_READING_SETTINGS } from '../core/types';
 import { awaitRequest, openDatabase, runTransaction } from './idb';
 
 export const DB_NAME = 'rights-pocket-guide';
@@ -56,7 +55,15 @@ interface ActiveRecord {
 
 interface SettingsRecord {
   readonly key: typeof KEY_SETTINGS;
+  /** Persisted as-authored; may be from an older schema and is coerced on read. */
   readonly value: ReadingSettings;
+  readonly schemaVersion: number;
+}
+
+/** A raw settings record as stored, before validation/migration. */
+export interface StoredSettings {
+  readonly value: ReadingSettings;
+  readonly schemaVersion: number;
 }
 
 function isActiveRecord(value: unknown): value is ActiveRecord {
@@ -74,7 +81,8 @@ function isSettingsRecord(value: unknown): value is SettingsRecord {
     value !== null &&
     (value as { key?: unknown }).key === KEY_SETTINGS &&
     typeof (value as { value?: unknown }).value === 'object' &&
-    (value as { value?: unknown }).value !== null
+    (value as { value?: unknown }).value !== null &&
+    typeof (value as { schemaVersion?: unknown }).schemaVersion === 'number'
   );
 }
 
@@ -183,18 +191,23 @@ export class PackageStore {
 
   /**
    * Atomically promote a staged version to active with a compare-and-set on the
-   * active pointer. In ONE transaction:
+   * active pointer AND migrate the reading-settings schema in the same
+   * transaction. In ONE transaction:
    *   1. read the current active pointer;
    *   2. abort (StalePromotionError) unless it equals `expectedActive`;
    *   3. copy the staged snapshot into `packages`;
    *   4. advance the active pointer;
-   *   5. delete the staged copy.
-   * If any step fails, the whole transaction rolls back — the previous active
-   * version stays complete and the staged copy remains only in `staging`.
+   *   5. delete the staged copy;
+   *   6. write the migrated settings record (value + target schema version).
+   * The settings write is last: if it fails (e.g. quota exhausted while writing
+   * the migrated record), the whole transaction — including the package and
+   * pointer — rolls back. A forced restart therefore lands on {old package +
+   * old settings} or {new package + new settings}, never a cross-version mix.
    */
   async promoteStaged(
     version: string,
     expectedActive: string | undefined,
+    migratedSettings: StoredSettings,
   ): Promise<void> {
     await runTransaction(
       this.db,
@@ -208,7 +221,7 @@ export class PackageStore {
           : undefined;
         if (found !== expectedActive) {
           // Lost the race (another tab already switched). Abort without
-          // touching packages or the pointer.
+          // touching packages, the pointer, or settings.
           throw new StalePromotionError(expectedActive, found);
         }
 
@@ -225,6 +238,14 @@ export class PackageStore {
         };
         await awaitRequest(meta.put(active));
         await awaitRequest(tx.objectStore(STORE_STAGING).delete(version));
+        // Couple the settings-schema migration to the switch. Written last so
+        // its failure aborts the entire promotion.
+        const settingsRecord: SettingsRecord = {
+          key: KEY_SETTINGS,
+          value: migratedSettings.value,
+          schemaVersion: migratedSettings.schemaVersion,
+        };
+        await awaitRequest(meta.put(settingsRecord));
       },
     );
   }
@@ -257,18 +278,35 @@ export class PackageStore {
     });
   }
 
-  async getSettings(): Promise<ReadingSettings> {
+  /**
+   * Read the raw persisted settings record (value + schema version) without
+   * coercion, or undefined on a fresh install. Callers (the service/repository)
+   * decide how to validate and migrate.
+   */
+  async getRawSettings(): Promise<StoredSettings | undefined> {
     return runTransaction(this.db, [STORE_META], 'readonly', async (tx) => {
       const record = await awaitRequest<unknown>(
         tx.objectStore(STORE_META).get(KEY_SETTINGS),
       );
-      return isSettingsRecord(record) ? record.value : DEFAULT_READING_SETTINGS;
+      if (!isSettingsRecord(record)) {
+        return undefined;
+      }
+      return { value: record.value, schemaVersion: record.schemaVersion };
     });
   }
 
-  async saveSettings(settings: ReadingSettings): Promise<void> {
+  /**
+   * Persist settings at a given schema version in a standalone transaction. A
+   * quota failure here rejects without disturbing the package or pointer; the
+   * previously persisted (last usable) settings remain intact.
+   */
+  async saveSettings(settings: ReadingSettings, schemaVersion: number): Promise<void> {
     await runTransaction(this.db, [STORE_META], 'readwrite', async (tx) => {
-      const record: SettingsRecord = { key: KEY_SETTINGS, value: settings };
+      const record: SettingsRecord = {
+        key: KEY_SETTINGS,
+        value: settings,
+        schemaVersion,
+      };
       await awaitRequest(tx.objectStore(STORE_META).put(record));
     });
   }

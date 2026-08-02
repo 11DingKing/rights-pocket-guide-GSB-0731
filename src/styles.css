@@ -47,6 +47,10 @@ h1 { font-size: 1.6rem; }
 
 a { color: var(--accent); }
 
+/* Schema-2 reading preference: link underlining. Default (schema 1 / on). */
+:root[data-underline-links='off'] a { text-decoration: none; }
+:root[data-underline-links='on'] a { text-decoration: underline; }
+
 /* Visible, strong focus indicator for keyboard users. */
 :focus-visible {
   outline: 3px solid var(--accent);

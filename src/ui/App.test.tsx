@@ -177,8 +177,8 @@ describe('reading settings persistence', () => {
 
     // Simulated restart: re-bootstrap against the same IndexedDB.
     const second = await boot();
-    const settings = await second.repository.getSettings();
-    expect(settings.fontScale).toBe('large');
+    const loaded = await second.repository.loadSettings();
+    expect(loaded.settings.fontScale).toBe('large');
   });
 });
 

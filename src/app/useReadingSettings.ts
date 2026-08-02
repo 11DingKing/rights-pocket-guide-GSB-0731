@@ -4,27 +4,34 @@ import { DEFAULT_READING_SETTINGS } from '../core/types';
 import type { ContentRepository } from '../services/repository';
 
 /**
- * Reading settings state. Loads persisted settings from the repository (which
- * reads IndexedDB for us — the view never touches IndexedDB), applies them to
- * the document root as data attributes (CSS keys off these), and persists
- * changes. Settings survive package switches because they live in a separate
- * `meta` record, not inside any package.
+ * Status of the reading-settings subsystem, surfaced to the UI so degraded
+ * states are conveyed accessibly (text + icon, never colour alone):
+ *  - `ok`: settings loaded and persist normally;
+ *  - `invalid`: the persisted value was invalid and was reverted to the last
+ *    usable / default value (nothing was lost silently);
+ *  - `quota`: a save failed because IndexedDB is out of space; the in-memory
+ *    settings still apply and the last successfully persisted value is intact.
  */
+export type SettingsStatus = 'ok' | 'invalid' | 'quota';
+
 export function useReadingSettings(repository: ContentRepository): {
   settings: ReadingSettings;
   update: (next: Partial<ReadingSettings>) => void;
   ready: boolean;
+  status: SettingsStatus;
 } {
   const [settings, setSettings] = useState<ReadingSettings>(
     DEFAULT_READING_SETTINGS,
   );
   const [ready, setReady] = useState(false);
+  const [status, setStatus] = useState<SettingsStatus>('ok');
 
   useEffect(() => {
     let cancelled = false;
-    void repository.getSettings().then((loaded) => {
+    void repository.loadSettings().then((loaded) => {
       if (!cancelled) {
-        setSettings(loaded);
+        setSettings(loaded.settings);
+        setStatus(loaded.valid ? 'ok' : 'invalid');
         setReady(true);
       }
     });
@@ -38,18 +45,30 @@ export function useReadingSettings(repository: ContentRepository): {
     root.dataset['fontScale'] = settings.fontScale;
     root.dataset['contrast'] = settings.contrast;
     root.dataset['lineSpacing'] = settings.lineSpacing;
+    root.dataset['underlineLinks'] = settings.underlineLinks;
   }, [settings]);
 
   const update = useCallback(
     (next: Partial<ReadingSettings>): void => {
       setSettings((current) => {
         const merged: ReadingSettings = { ...current, ...next };
-        void repository.saveSettings(merged);
+        // Apply optimistically (in memory) so the user is never left without a
+        // usable configuration, then attempt to persist. A quota failure keeps
+        // the applied value and the last persisted value both intact, and marks
+        // the status so the UI can explain the degraded state.
+        repository.saveSettings(merged).then(
+          () => {
+            setStatus('ok');
+          },
+          () => {
+            setStatus('quota');
+          },
+        );
         return merged;
       });
     },
     [repository],
   );
 
-  return { settings, update, ready };
+  return { settings, update, ready, status };
 }
