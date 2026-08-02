@@ -1,9 +1,19 @@
-import { DEFAULT_READING_SETTINGS } from "../core/types";
-import type { Article, ReadingSettings, Topic } from "../core/types";
+import {
+  defaultSettingsState,
+  migrateSettingsState,
+  parseSettingsState,
+  requiredSettingsSchema,
+} from "../core/settingsSchema";
+import type {
+  ReadingSettingsState,
+  SettingsV2Values,
+} from "../core/settingsSchema";
+import type { Article, Topic } from "../core/types";
 import { searchIndex } from "../core/search";
 import type { PackageStore, StoredPackage } from "../storage/packageStore";
 import type { SettingsStore } from "../storage/settingsStore";
 import { ensureSeeded } from "./seed";
+import { loadSettingsState } from "./settingsState";
 import { runUpdate } from "./updateService";
 import type { UpdateResult } from "./updateService";
 
@@ -22,7 +32,7 @@ export interface RepositorySnapshot {
   packageVersion: string | null;
   previousVersion: string | null;
   topics: Topic[];
-  settings: ReadingSettings;
+  settings: ReadingSettingsState;
   updateStatus: UpdateStatus;
   updateMessage: string | null;
   errorMessage: string | null;
@@ -31,6 +41,7 @@ export interface RepositorySnapshot {
 export type ArticleLinkResolution =
   | { kind: "ok"; article: Article }
   | { kind: "redirect"; fromId: string; article: Article }
+  | { kind: "broken"; fromId: string }
   | { kind: "missing"; fromId: string };
 
 export interface RankedArticle {
@@ -58,7 +69,7 @@ export interface RepositoryDeps {
  */
 export class Repository {
   private active: StoredPackage | null = null;
-  private settings: ReadingSettings = { ...DEFAULT_READING_SETTINGS };
+  private settings: ReadingSettingsState = defaultSettingsState(1);
   private loadStatus: LoadStatus = "loading";
   private updateStatus: UpdateStatus = "idle";
   private updateMessage: string | null = null;
@@ -98,7 +109,7 @@ export class Repository {
     }
   }
 
-  /** 启动：清理残留暂存 → 读取完整激活包（或离线播种）→ 读设置。 */
+  /** 启动：清理残留暂存 → 读取完整激活包（或离线播种）→ 按包版本抢救设置。 */
   async init(): Promise<void> {
     this.loadStatus = "loading";
     this.notify();
@@ -106,7 +117,7 @@ export class Repository {
       const active = await ensureSeeded(this.deps.store, this.deps.now);
       this.active = active;
       this.previousVersion = await this.deps.store.getPreviousVersion();
-      this.settings = await this.deps.settingsStore.read();
+      this.settings = await this.recoverSettings(active);
       this.loadStatus = "ready";
       this.errorMessage = null;
     } catch (error) {
@@ -115,6 +126,17 @@ export class Repository {
         error instanceof Error ? error.message : String(error);
     }
     this.notify();
+  }
+
+  /** 按激活包要求的 schema 读取/抢救设置（含修复写回）。 */
+  private async recoverSettings(
+    active: StoredPackage,
+  ): Promise<ReadingSettingsState> {
+    const recovery = await loadSettingsState(
+      this.deps.settingsStore,
+      requiredSettingsSchema(active.pack),
+    );
+    return recovery.state;
   }
 
   private requireActive(): StoredPackage {
@@ -132,21 +154,35 @@ export class Repository {
     return this.active?.pack.articles[articleId];
   }
 
-  /** 深链接解析：撤下条目确定性跳转到归一化后的替代条目。 */
+  /**
+   * 深链接解析：撤下条目沿替代链走向最终有效条目。
+   * 链上带环（数据损坏时）返回 broken，视图据此渲染稳定的降级页面，绝不死循环。
+   */
   resolveArticleLink(articleId: string): ArticleLinkResolution {
     const active = this.requireActive();
     const direct = active.pack.articles[articleId];
     if (direct !== undefined) {
       return { kind: "ok", article: direct };
     }
-    const replacementId = active.pack.withdrawals[articleId];
-    if (replacementId !== undefined) {
-      const replacement = active.pack.articles[replacementId];
-      if (replacement !== undefined) {
-        return { kind: "redirect", fromId: articleId, article: replacement };
+    const visited = new Set<string>([articleId]);
+    let target = active.pack.withdrawals[articleId];
+    while (target !== undefined) {
+      const article = active.pack.articles[target];
+      if (article !== undefined) {
+        return { kind: "redirect", fromId: articleId, article };
       }
+      if (visited.has(target)) {
+        return { kind: "broken", fromId: articleId };
+      }
+      visited.add(target);
+      target = active.pack.withdrawals[target];
     }
     return { kind: "missing", fromId: articleId };
+  }
+
+  /** 当前内容是否由旧版本更新而来（决定撤下跳转公告是否带“内容已更新”）。 */
+  contentWasUpdated(): boolean {
+    return this.active !== null && this.active.pack.baseVersion !== null;
   }
 
   /** 条目所属主题（用于“返回主题”链接）。 */
@@ -198,10 +234,36 @@ export class Repository {
       .sort((left, right) => left.legalRef.localeCompare(right.legalRef));
   }
 
-  async updateSettings(patch: Partial<ReadingSettings>): Promise<void> {
-    this.settings = { ...this.settings, ...patch };
-    await this.deps.settingsStore.write(this.settings);
+  /**
+   * 修改阅读偏好（同 schema 内）。写入失败（如配额耗尽）时内存状态不变，
+   * 返回 ok:false —— 最后一次可用设置不丢失，UI 进入可访问的降级提示。
+   */
+  async updateSettings(
+    patch: Partial<SettingsV2Values>,
+  ): Promise<{ ok: boolean; message?: string }> {
+    const current = this.settings;
+    const next: ReadingSettingsState =
+      current.schemaVersion === 1
+        ? {
+            schemaVersion: 1,
+            values: {
+              fontScale: patch.fontScale ?? current.values.fontScale,
+              theme: patch.theme ?? current.values.theme,
+              lineSpacing: patch.lineSpacing ?? current.values.lineSpacing,
+            },
+          }
+        : { schemaVersion: 2, values: { ...current.values, ...patch } };
+    try {
+      await this.deps.settingsStore.writeCurrent(next);
+    } catch (error) {
+      return {
+        ok: false,
+        message: error instanceof Error ? error.message : String(error),
+      };
+    }
+    this.settings = next;
     this.notify();
+    return { ok: true };
   }
 
   /** 检查并安装更新。结果同时反映在快照与返回值（供 UI 公告）。 */
@@ -222,6 +284,7 @@ export class Repository {
       const result = await runUpdate({
         fetchText: this.deps.fetchText,
         store: this.deps.store,
+        settingsStore: this.deps.settingsStore,
         ...(this.deps.digest !== undefined ? { digest: this.deps.digest } : {}),
         ...(this.deps.publicKey !== undefined
           ? { publicKey: this.deps.publicKey }
@@ -231,13 +294,19 @@ export class Repository {
       if (result.status === "updated") {
         this.active = await this.deps.store.readConsistentActive();
         this.previousVersion = await this.deps.store.getPreviousVersion();
+        if (this.active !== null) {
+          this.settings = await this.recoverSettings(this.active);
+        }
         this.updateStatus = "updated";
         this.updateMessage = result.toVersion;
-      } else if (result.status === 'already-current') {
+      } else if (result.status === "already-current") {
         // 可能刚被其他标签页抢先提交：重载激活包以收敛到一致视图。
         this.active = await this.deps.store.readConsistentActive();
         this.previousVersion = await this.deps.store.getPreviousVersion();
-        this.updateStatus = 'already-current';
+        if (this.active !== null) {
+          this.settings = await this.recoverSettings(this.active);
+        }
+        this.updateStatus = "already-current";
         this.updateMessage = result.activeVersion;
       } else {
         this.active = await this.deps.store.readConsistentActive();
@@ -251,9 +320,44 @@ export class Repository {
     }
   }
 
-  /** 回滚到上一个保留版本；没有可回滚版本时返回 null。 */
+  /**
+   * 回滚到上一个保留版本：包翻转与设置恢复在同一个事务提交，
+   * 设置优先取更新前写入的 backup（精确恢复最后一次可用设置）。
+   * 没有可回滚版本时返回 null。
+   */
   async rollback(): Promise<string | null> {
-    const rolledBackTo = await this.deps.store.rollbackToPrevious();
+    const active = this.active;
+    const previousVersion = await this.deps.store.getPreviousVersion();
+    if (active === null || previousVersion === null) {
+      this.updateStatus = "failed";
+      this.updateMessage = "没有可回滚的版本";
+      this.notify();
+      return null;
+    }
+    const previous = await this.deps.store.getPackage(previousVersion);
+    if (previous === undefined) {
+      this.updateStatus = "failed";
+      this.updateMessage = "没有可回滚的版本";
+      this.notify();
+      return null;
+    }
+    const targetSchema = requiredSettingsSchema(previous.pack);
+    const raw = await this.deps.settingsStore.readRaw();
+    const restored =
+      parseSettingsState(raw.backup, targetSchema) ??
+      ((): ReadingSettingsState => {
+        const currentAny = parseSettingsState(
+          raw.current,
+          requiredSettingsSchema(active.pack),
+        );
+        return currentAny !== null
+          ? migrateSettingsState(currentAny, targetSchema)
+          : defaultSettingsState(targetSchema);
+      })();
+    const rolledBackTo = await this.deps.store.rollbackToPrevious({
+      next: restored,
+      backup: this.settings,
+    });
     if (rolledBackTo === null) {
       this.updateStatus = "failed";
       this.updateMessage = "没有可回滚的版本";
@@ -262,6 +366,7 @@ export class Repository {
     }
     this.active = await this.deps.store.readConsistentActive();
     this.previousVersion = await this.deps.store.getPreviousVersion();
+    this.settings = restored;
     this.updateStatus = "rolled-back";
     this.updateMessage = rolledBackTo;
     this.notify();

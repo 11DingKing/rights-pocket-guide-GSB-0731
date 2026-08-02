@@ -1,12 +1,16 @@
 import type { ContentPackage } from "../core/types";
 import type { SearchIndex } from "../core/search";
+import type { ReadingSettingsState } from "../core/settingsSchema";
 import { SwitchConflictError } from "../core/errors";
 import { mapIdbError, requestToPromise, runInTransaction } from "./idb";
 import {
   META_ACTIVE_VERSION,
   META_PREVIOUS_VERSION,
+  SETTINGS_KEY_BACKUP,
+  SETTINGS_KEY_CURRENT,
   STORE_META,
   STORE_PACKAGES,
+  STORE_SETTINGS,
   openGuideDatabase,
 } from "./database";
 
@@ -98,25 +102,19 @@ export class PackageStore {
 
   /**
    * 暂存：完整写入新包（含索引），状态 staged。此刻激活指针不变。
-   * 并发守卫：同版本记录已是 active/retained 时不覆盖（另一标签页可能已提交）。
+   * 并发守卫：同版本记录已是 active 时不覆盖（另一标签页可能已提交）；
+   * retained 记录允许被覆盖（回滚后重新更新同一版本的合法路径）。
    */
   async stagePackage(record: StoredPackage): Promise<void> {
-    const staged: StoredPackage = { ...record, status: "staged" };
-    await runInTransaction(
-      this.db,
-      [STORE_PACKAGES],
-      "readwrite",
-      async (tx) => {
-        const store = tx.objectStore(STORE_PACKAGES);
-        const existing = asStoredPackage(
-          await requestToPromise(store.get(record.version)),
-        );
-        if (existing !== undefined && existing.status !== "staged") {
-          return;
-        }
-        await requestToPromise(store.put(staged));
-      },
-    );
+    const staged: StoredPackage = { ...record, status: 'staged' };
+    await runInTransaction(this.db, [STORE_PACKAGES], 'readwrite', async (tx) => {
+      const store = tx.objectStore(STORE_PACKAGES);
+      const existing = asStoredPackage(await requestToPromise(store.get(record.version)));
+      if (existing !== undefined && existing.status === 'active') {
+        return;
+      }
+      await requestToPromise(store.put(staged));
+    });
   }
 
   /**
@@ -124,55 +122,61 @@ export class PackageStore {
    * 激活指针翻转。提交前崩溃/失败 ⇒ 事务回滚 ⇒ 旧版本完整保留。
    * 乐观并发：事务内先核对 expectedBaseVersion；若已被其他标签页抢先提交，
    * 抛 SwitchConflictError，本次提交整体放弃。
+   * 传入 settings 时，设置迁移（current=next、backup=旧设置）也在同一事务提交：
+   * 包与设置只能同新或同旧，绝不混搭。
    */
   async activateStaged(
     version: string,
     expectedBaseVersion: string | null,
+    settings?: { next: ReadingSettingsState; backup: ReadingSettingsState },
   ): Promise<{ previousVersion: string | null }> {
-    return runInTransaction(
-      this.db,
-      [STORE_PACKAGES, STORE_META],
-      "readwrite",
-      async (tx) => {
-        const packages = tx.objectStore(STORE_PACKAGES);
-        const meta = tx.objectStore(STORE_META);
-        const currentRaw = await requestToPromise(
-          meta.get(META_ACTIVE_VERSION),
+    const stores =
+      settings === undefined
+        ? [STORE_PACKAGES, STORE_META]
+        : [STORE_PACKAGES, STORE_META, STORE_SETTINGS];
+    return runInTransaction(this.db, stores, "readwrite", async (tx) => {
+      const packages = tx.objectStore(STORE_PACKAGES);
+      const meta = tx.objectStore(STORE_META);
+      const currentRaw = await requestToPromise(meta.get(META_ACTIVE_VERSION));
+      const currentVersion = typeof currentRaw === "string" ? currentRaw : null;
+      if (currentVersion !== expectedBaseVersion) {
+        throw new SwitchConflictError(
+          expectedBaseVersion ?? "无",
+          currentVersion,
         );
-        const currentVersion =
-          typeof currentRaw === "string" ? currentRaw : null;
-        if (currentVersion !== expectedBaseVersion) {
-          throw new SwitchConflictError(
-            expectedBaseVersion ?? "无",
-            currentVersion,
-          );
-        }
-        const staged = asStoredPackage(
-          await requestToPromise(packages.get(version)),
+      }
+      const staged = asStoredPackage(
+        await requestToPromise(packages.get(version)),
+      );
+      if (staged === undefined || staged.status !== "staged") {
+        throw new Error(`没有可激活的暂存包 ${version}`);
+      }
+      if (currentVersion !== null && currentVersion !== version) {
+        const current = asStoredPackage(
+          await requestToPromise(packages.get(currentVersion)),
         );
-        if (staged === undefined || staged.status !== "staged") {
-          throw new Error(`没有可激活的暂存包 ${version}`);
-        }
-        if (currentVersion !== null && currentVersion !== version) {
-          const current = asStoredPackage(
-            await requestToPromise(packages.get(currentVersion)),
-          );
-          if (current !== undefined) {
-            await requestToPromise(
-              packages.put({ ...current, status: "retained" }),
-            );
-          }
-        }
-        await requestToPromise(packages.put({ ...staged, status: "active" }));
-        await requestToPromise(meta.put(version, META_ACTIVE_VERSION));
-        if (currentVersion !== null && currentVersion !== version) {
+        if (current !== undefined) {
           await requestToPromise(
-            meta.put(currentVersion, META_PREVIOUS_VERSION),
+            packages.put({ ...current, status: "retained" }),
           );
         }
-        return { previousVersion: currentVersion };
-      },
-    );
+      }
+      await requestToPromise(packages.put({ ...staged, status: "active" }));
+      await requestToPromise(meta.put(version, META_ACTIVE_VERSION));
+      if (currentVersion !== null && currentVersion !== version) {
+        await requestToPromise(meta.put(currentVersion, META_PREVIOUS_VERSION));
+      }
+      if (settings !== undefined) {
+        const settingsStore = tx.objectStore(STORE_SETTINGS);
+        await requestToPromise(
+          settingsStore.put(settings.next, SETTINGS_KEY_CURRENT),
+        );
+        await requestToPromise(
+          settingsStore.put(settings.backup, SETTINGS_KEY_BACKUP),
+        );
+      }
+      return { previousVersion: currentVersion };
+    });
   }
 
   /** 清理未被激活的暂存包（更新失败或崩溃后的启动清理）。 */
@@ -212,47 +216,54 @@ export class PackageStore {
 
   /**
    * 回滚到上一个保留版本：单事务内交换 active/retained 并翻转指针。
-   * 没有可回滚版本时返回 null。
+   * 传入 settings 时把设置恢复到 next（通常为更新前备份），backup 记为当前设置，
+   * 与包翻转同事务提交。没有可回滚版本时返回 null。
    */
-  async rollbackToPrevious(): Promise<string | null> {
-    return runInTransaction(
-      this.db,
-      [STORE_PACKAGES, STORE_META],
-      "readwrite",
-      async (tx) => {
-        const packages = tx.objectStore(STORE_PACKAGES);
-        const meta = tx.objectStore(STORE_META);
-        const currentRaw = await requestToPromise(
-          meta.get(META_ACTIVE_VERSION),
-        );
-        const previousRaw = await requestToPromise(
-          meta.get(META_PREVIOUS_VERSION),
-        );
-        const currentVersion =
-          typeof currentRaw === "string" ? currentRaw : null;
-        const previousVersion =
-          typeof previousRaw === "string" ? previousRaw : null;
-        if (currentVersion === null || previousVersion === null) {
-          return null;
-        }
-        const current = asStoredPackage(
-          await requestToPromise(packages.get(currentVersion)),
-        );
-        const previous = asStoredPackage(
-          await requestToPromise(packages.get(previousVersion)),
-        );
-        if (current === undefined || previous === undefined) {
-          return null;
-        }
+  async rollbackToPrevious(settings?: {
+    next: ReadingSettingsState;
+    backup: ReadingSettingsState;
+  }): Promise<string | null> {
+    const stores =
+      settings === undefined
+        ? [STORE_PACKAGES, STORE_META]
+        : [STORE_PACKAGES, STORE_META, STORE_SETTINGS];
+    return runInTransaction(this.db, stores, "readwrite", async (tx) => {
+      const packages = tx.objectStore(STORE_PACKAGES);
+      const meta = tx.objectStore(STORE_META);
+      const currentRaw = await requestToPromise(meta.get(META_ACTIVE_VERSION));
+      const previousRaw = await requestToPromise(
+        meta.get(META_PREVIOUS_VERSION),
+      );
+      const currentVersion = typeof currentRaw === "string" ? currentRaw : null;
+      const previousVersion =
+        typeof previousRaw === "string" ? previousRaw : null;
+      if (currentVersion === null || previousVersion === null) {
+        return null;
+      }
+      const current = asStoredPackage(
+        await requestToPromise(packages.get(currentVersion)),
+      );
+      const previous = asStoredPackage(
+        await requestToPromise(packages.get(previousVersion)),
+      );
+      if (current === undefined || previous === undefined) {
+        return null;
+      }
+      await requestToPromise(packages.put({ ...current, status: "retained" }));
+      await requestToPromise(packages.put({ ...previous, status: "active" }));
+      await requestToPromise(meta.put(previousVersion, META_ACTIVE_VERSION));
+      await requestToPromise(meta.put(currentVersion, META_PREVIOUS_VERSION));
+      if (settings !== undefined) {
+        const settingsStore = tx.objectStore(STORE_SETTINGS);
         await requestToPromise(
-          packages.put({ ...current, status: "retained" }),
+          settingsStore.put(settings.next, SETTINGS_KEY_CURRENT),
         );
-        await requestToPromise(packages.put({ ...previous, status: "active" }));
-        await requestToPromise(meta.put(previousVersion, META_ACTIVE_VERSION));
-        await requestToPromise(meta.put(currentVersion, META_PREVIOUS_VERSION));
-        return previousVersion;
-      },
-    );
+        await requestToPromise(
+          settingsStore.put(settings.backup, SETTINGS_KEY_BACKUP),
+        );
+      }
+      return previousVersion;
+    });
   }
 
   /**

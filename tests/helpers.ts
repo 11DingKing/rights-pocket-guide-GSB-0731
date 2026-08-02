@@ -42,7 +42,10 @@ export interface TestSigner {
 }
 
 function nodeSigner(privateJwk: JsonWebKey, publicJwk: JsonWebKey): TestSigner {
-  const key = createPrivateKey({ key: privateJwk as NodeJsonWebKey, format: "jwk" });
+  const key = createPrivateKey({
+    key: privateJwk as NodeJsonWebKey,
+    format: "jwk",
+  });
   return {
     publicKey: publicJwk,
     sign: (sha256Hex: string) =>
@@ -169,6 +172,29 @@ export function expectedV2Pack(): ContentPackage {
     expectedV1Pack(),
     parseDeltaPackage(parseJsonUnknown(fixtureText("content-pack-v2.json"))),
   );
+}
+
+/**
+ * 损坏内容包：ART-AID-2 不在有效条目里，但撤下映射成环
+ * （ART-AID-2 → ART-X → ART-AID-2）。用于验证 broken 降级路径。
+ */
+export function corruptCyclicPack(): ContentPackage {
+  const base = expectedV1Pack();
+  const articles: Record<string, (typeof base.articles)[string]> = {};
+  for (const [id, article] of Object.entries(base.articles)) {
+    if (id !== "ART-AID-2") {
+      articles[id] = article;
+    }
+  }
+  return {
+    ...base,
+    topics: base.topics.map((topic) => ({
+      ...topic,
+      articleIds: topic.articleIds.filter((id) => id !== "ART-AID-2"),
+    })),
+    articles,
+    withdrawals: { "ART-AID-2": "ART-X", "ART-X": "ART-AID-2" },
+  };
 }
 
 export interface TestRig {

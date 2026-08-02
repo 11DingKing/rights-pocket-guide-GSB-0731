@@ -9,6 +9,9 @@ export const STORE_SETTINGS = "settings";
 export const META_ACTIVE_VERSION = "activeVersion";
 export const META_PREVIOUS_VERSION = "previousVersion";
 
+export const SETTINGS_KEY_CURRENT = "reading";
+export const SETTINGS_KEY_BACKUP = "readingBackup";
+
 export function openGuideDatabase(): Promise<IDBDatabase> {
   return openDatabase(DB_NAME, DB_VERSION, (db) => {
     if (!db.objectStoreNames.contains(STORE_PACKAGES)) {

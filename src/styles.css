@@ -62,6 +62,10 @@ html[data-line-spacing='loose'] body {
   line-height: 2;
 }
 
+html[data-letter-spacing='wide'] body {
+  letter-spacing: 0.08em;
+}
+
 a {
   color: var(--accent);
   text-decoration: underline;

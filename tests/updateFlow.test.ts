@@ -293,20 +293,34 @@ describe("失败后的确定性行为", () => {
     ).toEqual(["ART-AID-2"]);
   });
 
-  it("阅读设置存放在独立仓，跨版本切换保持不变", async () => {
-    const { repository, settingsStore } = await createRig({
+  it("阅读设置存放在独立仓，跨版本切换保持不变并随包迁移 schema", async () => {
+    const { repository, store, settingsStore } = await createRig({
       fetchText: defaultChannel().fetchText,
     });
+    expect(repository.getSnapshot().settings.schemaVersion).toBe(1);
     await repository.updateSettings({ fontScale: "large", theme: "dark" });
     await repository.checkForUpdates();
     expect(repository.getSnapshot().packageVersion).toBe(V2);
-    expect(repository.getSnapshot().settings).toMatchObject({
-      fontScale: "large",
-      theme: "dark",
+    // 迁移到 schema 2：偏好保留，新增字段取默认
+    expect(repository.getSnapshot().settings).toEqual({
+      schemaVersion: 2,
+      values: {
+        fontScale: "large",
+        theme: "dark",
+        lineSpacing: "standard",
+        letterSpacing: "standard",
+      },
     });
-    // 重启后（全新仓储）设置仍在
-    const reopened = await settingsStore.read();
-    expect(reopened).toMatchObject({ fontScale: "large", theme: "dark" });
+    // 重启后（全新仓储）设置仍在且 schema 与包一致
+    const restarted = new Repository({
+      store,
+      settingsStore,
+      fetchText: offlineFetcher(),
+    });
+    await restarted.init();
+    expect(restarted.getSnapshot().settings).toEqual(
+      repository.getSnapshot().settings,
+    );
   });
 });
 

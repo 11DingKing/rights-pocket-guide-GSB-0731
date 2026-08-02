@@ -16,14 +16,22 @@ import {
 import { buildSearchIndex } from "../core/search";
 import type { SearchIndex } from "../core/search";
 import { verifyPackSignature } from "../core/signature";
+import {
+  migrateSettingsState,
+  requiredSettingsSchema,
+} from "../core/settingsSchema";
 import type { ContentPackage, ManifestEntry } from "../core/types";
 import type { PackageStore } from "../storage/packageStore";
+import type { SettingsStore } from "../storage/settingsStore";
 import { DEV_SIGNING_PUBLIC_KEY } from "./signingKeys";
+import { loadSettingsState } from "./settingsState";
 
 export interface UpdateDeps {
   /** 下载入口（测试可注入中断）。 */
   fetchText: (url: string) => Promise<string>;
   store: PackageStore;
+  /** 设置存储：传入后，schema 迁移随切换事务原子提交。 */
+  settingsStore?: SettingsStore;
   /** 摘要算法（测试可注入以制造校验失败）。 */
   digest?: (bytes: Uint8Array) => Promise<string>;
   /** 签名验证公钥（默认随应用分发的开发公钥；测试注入自己的密钥对）。 */
@@ -190,10 +198,25 @@ export async function runUpdate(deps: UpdateDeps): Promise<UpdateResult> {
     return fail("staging", error);
   }
 
-  // 阶段 8：原子切换（单事务翻转指针；携带基线版本做乐观并发检查）。
+  // 阶段 8：原子切换（单事务翻转指针；携带基线版本做乐观并发检查；
+  // 设置 schema 迁移也在同一事务提交，包与设置同新或同旧）。
   report("switch");
   try {
-    await store.activateStaged(pack.packageVersion, activeVersion);
+    const settingsStore = deps.settingsStore;
+    const fromSchema = requiredSettingsSchema(active.pack);
+    const toSchema = requiredSettingsSchema(pack);
+    if (settingsStore !== undefined && fromSchema !== toSchema) {
+      const current = await loadSettingsState(settingsStore, fromSchema, {
+        repair: false,
+      });
+      const next = migrateSettingsState(current.state, toSchema);
+      await store.activateStaged(pack.packageVersion, activeVersion, {
+        next,
+        backup: current.state,
+      });
+    } else {
+      await store.activateStaged(pack.packageVersion, activeVersion);
+    }
   } catch (error) {
     if (error instanceof SwitchConflictError) {
       // 另一标签页抢先提交；若目标版本已就位，按“已是最新”收敛。

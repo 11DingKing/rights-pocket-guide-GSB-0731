@@ -69,7 +69,7 @@ export interface ManifestEntry {
   url: string;
   sha256: string;
   signature: string;
-  kind: 'full' | 'delta';
+  kind: "full" | "delta";
   succeeds?: string;
 }
 
@@ -78,19 +78,8 @@ export interface UpdateManifest {
   packages: ManifestEntry[];
 }
 
-// 阅读设置（独立于内容包存储，跨版本保留）。
+// 阅读设置的字段枚举（schema 见 core/settingsSchema.ts）。
 export type FontScale = "standard" | "large" | "xlarge";
 export type ThemeName = "system" | "light" | "dark" | "contrast";
 export type LineSpacing = "standard" | "loose";
-
-export interface ReadingSettings {
-  fontScale: FontScale;
-  theme: ThemeName;
-  lineSpacing: LineSpacing;
-}
-
-export const DEFAULT_READING_SETTINGS: ReadingSettings = {
-  fontScale: "standard",
-  theme: "system",
-  lineSpacing: "standard",
-};
+export type LetterSpacing = "standard" | "wide";

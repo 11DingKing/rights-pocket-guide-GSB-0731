@@ -85,12 +85,15 @@ function Shell({ repository }: { repository: Repository }) {
   const snapshot = useRepositorySnapshot(repository);
   const mainRef = useRef<HTMLElement | null>(null);
 
-  // 阅读设置应用到根元素（CSS 变量随 data 属性切换）。
+  // 阅读设置应用到根元素（CSS 变量随 data 属性切换；字间距为 schema 2 字段）。
   useEffect(() => {
     const root = document.documentElement;
-    root.dataset["theme"] = snapshot.settings.theme;
-    root.dataset["fontScale"] = snapshot.settings.fontScale;
-    root.dataset["lineSpacing"] = snapshot.settings.lineSpacing;
+    const { settings } = snapshot;
+    root.dataset['theme'] = settings.values.theme;
+    root.dataset['fontScale'] = settings.values.fontScale;
+    root.dataset['lineSpacing'] = settings.values.lineSpacing;
+    root.dataset['letterSpacing'] =
+      settings.schemaVersion === 2 ? settings.values.letterSpacing : 'standard';
   }, [snapshot.settings]);
 
   // 更新/回滚完成后，把焦点确定性恢复到当前页主标题。

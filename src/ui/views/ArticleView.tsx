@@ -7,7 +7,8 @@ import { useHeadingFocus, useRepositorySnapshot } from '../hooks';
 
 /**
  * 条目视图。撤下条目的深链接会被确定性地重定向到替代条目：
- * 先公告，再替换地址，最后焦点落到新条目标题。
+ * 先公告（内容经更新而来时带“内容已更新”前缀），再替换地址，
+ * 最后焦点落到新条目标题。替代链成环时渲染稳定的降级页面。
  */
 export function ArticleView({
   repository,
@@ -24,10 +25,14 @@ export function ArticleView({
 
   useEffect(() => {
     if (resolution.kind === 'redirect') {
-      announce(announcements.withdrawnRedirect, { assertive: true });
+      announce(announcements.withdrawnRedirect(repository.contentWasUpdated()), {
+        assertive: true
+      });
       replaceWith(articleHash(resolution.article.id));
+    } else if (resolution.kind === 'broken') {
+      announce(announcements.brokenRedirect, { assertive: true });
     }
-  }, [resolution, announce]);
+  }, [resolution, announce, repository]);
 
   if (resolution.kind === 'redirect') {
     return (
@@ -35,6 +40,18 @@ export function ArticleView({
         <h1 id="redirect-heading" tabIndex={-1}>
           正在跳转到替代条目…
         </h1>
+      </section>
+    );
+  }
+
+  if (resolution.kind === 'broken') {
+    return (
+      <section aria-labelledby="broken-heading" data-testid="broken-link">
+        <h1 id="broken-heading" tabIndex={-1} ref={headingRef}>
+          条目暂时不可用
+        </h1>
+        <p>该条目的替代关系存在异常。其余内容不受影响，可以继续浏览。</p>
+        <a href="#/">返回主题浏览</a>
       </section>
     );
   }
