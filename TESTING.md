@@ -1,0 +1,115 @@
+# 测试与验收说明
+
+本文件给出**可复现**的验收流程与证据，覆盖键盘路径、屏幕阅读器公告、离线更新（含各阶段中断与配额不足）、回滚、首次离线启动、深链接迁移、全文检索确定性、阅读设置与焦点恢复。
+
+## 1. 一键命令
+
+```bash
+npm install
+npm run typecheck   # tsc -b --noEmit，strict + noUncheckedIndexedAccess
+npm test            # vitest run，7 个测试文件 / 57 个用例
+npm run build       # tsc -b && vite build
+npm run dev         # 原生浏览器验收：http://localhost:5173/
+```
+
+所有断言均在**无 UI 组件库 / 无全文检索库 / 无状态管理库**的前提下完成；IndexedDB 在 Node 中由 `fake-indexeddb` 提供，在浏览器中使用原生实现。
+
+## 2. 分层与原子性保证
+
+| 层 | 文件 | 职责 | 视图是否直接接触 |
+|---|---|---|---|
+| 解析/校验 | [parser.ts](src/content/parser.ts) | JSON→类型化完整包/增量包，结构校验 | 否 |
+| 归并 | [resolver.ts](src/content/resolver.ts) | 把 v2 增量物化（REVISE/WITHDRAW/ADD）为完整包 | 否 |
+| 完整性 | [checksum.ts](src/content/checksum.ts) | SHA-256 校验（Web Crypto + 纯回退） | 否 |
+| 检索 | [search/index.ts](src/search/index.ts) | 自研中文一元/二元分词 + TF-IDF 倒排索引 | 否 |
+| 存储 | [storage/db.ts](src/storage/db.ts)、[repository.ts](src/storage/repository.ts) | IndexedDB 暂存区、原子提交、回滚、设置 | **否** |
+| 编排 | [services/contentService.ts](src/services/contentService.ts) | 下载→校验→归并→暂存→建索引→原子切换；阶段公告 | 仅通过此层 |
+| 视图 | [App.tsx](src/App.tsx)、[components/](src/components) | React 视图、路由、a11y、焦点 | 不直接读写 IndexedDB |
+
+原子切换的关键：`commit` 在**单个 `readwrite` 事务**内写入 `activeVersion`、`previousVersion` 并删除 `stagedVersion`；视图持有的 `pack/index` 只在 `await commit()` 成功后才替换。暂存失败、校验失败、下载失败或任何阶段中断都不会改动 `activeVersion`。
+
+## 3. 自动化测试证据
+
+> 所有用例均可通过 `npx vitest run <文件>` 单独复现。结果列来自最近一次 `npm test`：`Tests 57 passed (57)`。
+
+### 3.1 键盘路径
+
+| # | 场景 | 复现（测试名 / 文件） | 关键断言 | 结果 |
+|---|---|---|---|---|
+| K1 | 跳过链接是首个 Tab 目标 | `navigates topics and articles entirely by keyboard`  [app.test.tsx](tests/app.test.tsx) | 首次 `Tab` 聚焦“跳到主要内容” | ✅ |
+| K2 | Tab 顺序覆盖返回首页/搜索/设置/更新/主题 | 同上 | 依次 `aria-label` 为 返回首页、打开搜索、阅读设置、检查更新、法律援助 | ✅ |
+| K3 | 键盘 Enter 进入主题 | 同上 | 焦点移至主题 `<h1>`，URL 变为 `#/topic/TOPIC-AID` | ✅ |
+| K4 | 键盘 Enter 打开文章 | 同上 | URL 变为 `#/article/ART-AID-1`，焦点移至文章 `<h1>` | ✅ |
+| K5 | 浏览器后退恢复焦点 | 同上 | 后退后活动元素 `href="#/article/ART-AID-1"`（列表项重建后仍可重新定位） | ✅ |
+| K6 | 所有图标按钮具可访问名称 | `exposes accessible names for all icon buttons` [app.test.tsx](tests/app.test.tsx) | 通过 `getByRole('button',{name})` 找到搜索/设置/更新按钮 | ✅ |
+
+### 3.2 屏幕阅读器公告
+
+| # | 场景 | 复现（测试名 / 文件） | 公告位置 | 结果 |
+|---|---|---|---|---|
+| A1 | 路由变更公告标题 | `announces route changes through the polite live region` [app.test.tsx](tests/app.test.tsx) | `role=status` 区域（`data-testid=live-region`）出现主题/文章标题 | ✅ |
+| A2 | 更新进度与成功公告 | `announces update progress and success via a status region` [app.test.tsx](tests/app.test.tsx) | 顶部状态栏 `data-testid=update-status` 出现“已更新到版本 2026.09.01” | ✅ |
+| A3 | 离线/失败公告且保留旧内容 | `announces failure and keeps old content when offline` [app.test.tsx](tests/app.test.tsx) | 状态栏出现“更新失败”，旧文章仍在文档中 | ✅ |
+| A4 | 撤下文章跳转替代条目公告 | `redirects a withdrawn article deep link to its replacement after update` [app.test.tsx](tests/app.test.tsx) | `data-testid=notice-region` 出现“已为您跳转到替代文章：行动不便时的上门服务” | ✅ |
+| A5 | 状态不只靠颜色 | `communicates update status with text, not color alone` [app.test.tsx](tests/app.test.tsx) | 同时断言 `data-tone=status-success` 与文本内容；圆点 `aria-hidden` | ✅ |
+
+实时区域实现见 [LiveRegion.tsx](src/components/LiveRegion.tsx)：`aria-live` + `aria-atomic`，通过 rAF 清空再赋值以保证重复文本也能被二次播报。
+
+### 3.3 离线更新、阶段中断与配额
+
+| # | 场景 | 复现（测试名 / 文件） | 旧版本保持完整的证据 | 结果 |
+|---|---|---|---|---|
+| U1 | 首次离线启动（无网络） | `boots offline from the bundled seed without any network` [atomic-update.test.ts](tests/atomic-update.test.ts) | 用捆绑种子初始化后 `fetch` 未被调用；更新失败后仍为 v1 | ✅ |
+| U2 | 下载阶段中断 | `keeps the complete old version when download is interrupted` [atomic-update.test.ts](tests/atomic-update.test.ts) | `downloader` reject 后 `activeVersion` 仍为 v1，无 `stagedVersion` | ✅ |
+| U3 | 校验阶段失败（校验和不符） | `keeps the complete old version when checksum mismatches` [atomic-update.test.ts](tests/atomic-update.test.ts) | 状态 phase=`failed` 且消息含“完整性”；v1 文章可检索 | ✅ |
+| U4 | `verifying` 阶段中断 | `discards staging and keeps v1 when interrupted at verifying` [atomic-update.test.ts](tests/atomic-update.test.ts) | `onPhase` 抛 `UpdateAbortedError`；无暂存、无新包 | ✅ |
+| U5 | `indexing` 阶段中断（已暂存后） | `discards staging and keeps v1 when interrupted at indexing` [atomic-update.test.ts](tests/atomic-update.test.ts) | 暂存被 `discardStaging` 清理，`getPack('2026.09.01')` 为 `null` | ✅ |
+| U6 | `committing` 阶段中断 | `discards staging and keeps v1 when interrupted at committing` [atomic-update.test.ts](tests/atomic-update.test.ts) | 提交前中断，活动版本仍为 v1 | ✅ |
+| U7 | IndexedDB 配额不足（暂存期间） | `keeps the complete old version when IndexedDB quota is exceeded during staging` [atomic-update.test.ts](tests/atomic-update.test.ts) | 注入 `QuotaExceededStorageError`；phase=failed，消息含“存储空间”，v1 不变 | ✅ |
+| U8 | 提交前一刻视图仍只见旧包 | `exposes only the old pack right up to the atomic commit` [atomic-update.test.ts](tests/atomic-update.test.ts) | 在 `committing` 回调内读取 state，`packageVersion` 仍为 `2026.07.31` | ✅ |
+| U9 | 模拟崩溃/重启后清理暂存 | `cleans up interrupted staging on restart and shows only the complete old pack` [atomic-update.test.ts](tests/atomic-update.test.ts) | 新 `ContentService.initialize` 后 `stagedVersion=null`、新包被删除，只呈现 v1 | ✅ |
+| U10 | 成功原子切换并重建索引 | `switches from v1 to v2 atomically and rebuilds the index` [atomic-update.test.ts](tests/atomic-update.test.ts) | v2 中 `ART-AID-2` 消失、`ART-SERVICE-3` 可检索，撤下映射保留 | ✅ |
+| U11 | 阶段顺序确定 | `emits phase announcements in order` [atomic-update.test.ts](tests/atomic-update.test.ts) | 阶段严格为 downloading→verifying→resolving→staging→indexing→committing | ✅ |
+| U12 | 仓储原子提交/丢弃/重启清理 | storage [storage.test.ts](tests/storage.test.ts) | 9 个用例覆盖 seed、stage+commit、discard、rollback、设置持久化、重启清理 | ✅ |
+
+> 中断注入方式：服务 `checkUpdate(url, { onPhase, signal, downloader })` 允许在任意阶段回调中抛出 `UpdateAbortedError` 或让 `downloader` reject；仓储层通过覆盖 `stage` 抛出 `QuotaExceededStorageError` 模拟配额不足。重启通过新建 `ContentService` 并重新 `initialize` 复现，`initialize` 会调用 `cleanupInterruptedStaging`。
+
+### 3.4 回滚
+
+| # | 场景 | 复现（测试名 / 文件） | 证据 | 结果 |
+|---|---|---|---|---|
+| R1 | 服务层回滚到上一完整版本 | `rolls back to the previous complete version` [atomic-update.test.ts](tests/atomic-update.test.ts) | 更新到 v2 后 `rollback()` 返回 `2026.07.31`，活动包与索引恢复为 v1 | ✅ |
+| R2 | UI 回滚按钮可回滚 | `updates to v2, shows new content, and can rollback to v1` [app.test.tsx](tests/app.test.tsx) | 点击“回滚到上一版本”后旧文章“行动不便时的服务方式”重新出现、新文章消失 | ✅ |
+| R3 | 回滚历史版本留存 | `stages and atomically commits a new version` / `keeps the previous version for rollback` [storage.test.ts](tests/storage.test.ts) | 提交后 `previousVersion` 指向旧版，`rollback` 原子地改回指针 | ✅ |
+| R4 | 重载后仍可回滚 | 浏览器原生验收（见 §4） | 重载后服务从 DB 读取 `previousVersion`，回滚按钮仍可见并可用 | ✅ |
+
+### 3.5 跨版本确定性与深链接
+
+| # | 场景 | 复现（测试名 / 文件） | 证据 | 结果 |
+|---|---|---|---|---|
+| D1 | 深链接直接打开文章 | `loads a topic and article directly from the hash` [app.test.tsx](tests/app.test.tsx) | `#/article/ART-NOTARY-1` 直接渲染标题与法律依据 | ✅ |
+| D2 | 深链接打开搜索 | `loads search results from a deep link` [app.test.tsx](tests/app.test.tsx) | `#/search?q=公证` 渲染结果列表与计数 | ✅ |
+| D3 | 撤下文章深链接自动迁移替代条目 | `redirects a withdrawn article deep link to its replacement after update` [app.test.tsx](tests/app.test.tsx) | 更新后访问 `#/article/ART-AID-2` 被替换为 `#/article/ART-SERVICE-3` 并公告 | ✅ |
+| D4 | 检索排序在重复构建下确定 | `produces deterministic ordering across repeated queries and rebuilds` [search.test.ts](tests/search.test.ts) | 两个独立索引对同一查询返回相同顺序 | ✅ |
+| D5 | 撤下条目不可检索、替代条目可检索 | `reflects withdrawn articles removed and new articles searchable in v2` [search.test.ts](tests/search.test.ts) | v2 搜“行动不便”不返回 ART-AID-2，搜“上门服务”首条为 ART-SERVICE-3 | ✅ |
+| D6 | 阅读设置跨更新保留 | `preserves reading settings across a version update` [atomic-update.test.ts](tests/atomic-update.test.ts) | 设为 large/dark 后更新到 v2，设置不变；UI 测试验证写入 `data-font-size`/`data-theme` 并持久化 | ✅ |
+| D7 | REVISE/WITHDRAW/ADD 物化正确 | resolver [resolver.test.ts](tests/resolver.test.ts) | 7 个用例覆盖三类变更、基线不符、缺失替代条目、缺失主题等 | ✅ |
+
+## 4. 原生浏览器验收
+
+`npm run dev` 后在 http://localhost:5173/ 手动复现（已用集成浏览器实测通过）：
+
+1. **首屏**：捆绑 v1 直接渲染“法律援助/公证费用减免”两主题，状态栏显示“当前版本 2026.07.31”。
+2. **更新**：点击右上“检查更新”（刷新图标）→ 依次公告“正在下载/校验/归并/暂存/建索引/切换”，完成后出现“行动不便时的上门服务”，旧文“行动不便时的服务方式”消失，状态栏显示“已更新到版本 2026.09.01”，并出现“回滚到上一版本”。
+3. **撤下迁移**：在地址栏访问 `http://localhost:5173/#/article/ART-AID-2`（v2 已生效）→ 自动跳到 `#/article/ART-SERVICE-3` 并公告替代。
+4. **回滚**：点击“回滚到上一版本”→ 内容恢复为 v1；刷新页面后回滚按钮仍在（上一版本持久化在 IndexedDB）。
+5. **阅读设置**：点击齿轮图标进入设置，切换字号/主题，`<html>` 上 `data-font-size`/`data-theme` 立即变化并持久化。
+6. **离线**：DevTools→Network→Offline 后刷新，应用仍从 IndexedDB/捆绑种子正常启动；点击“检查更新”公告失败且仍显示旧版本，无新旧混排。
+
+IndexedDB 结构（数据库名 `rights-pocket-guide`，版本 3）：
+
+- `packs`（keyPath `packageVersion`）：完整物化包；
+- `meta`（keyPath `key`）：`activeVersion`、`previousVersion`、`stagedVersion`；
+- `settings`（keyPath `key`）：阅读设置。
+
+更新流程中，新包先写入 `packs` 并登记 `stagedVersion`；提交仅在一个事务内改三个 meta 键。任何失败/崩溃都不会移动 `activeVersion`，重启时 `initialize` 会清理残留 `stagedVersion` 及其包，因此用户只能看到**完整旧包**或**完整新包**。
