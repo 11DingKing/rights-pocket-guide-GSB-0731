@@ -1,17 +1,20 @@
 {
-  "generatedAt": "2026-08-02T09:01:21.773Z",
+  "generatedAt": "2026-08-02T10:13:13.699Z",
   "latest": "2026.09.01",
+  "publicKey": "MCowBQYDK2VwAyEAD3frkzDq2CD7MunYK0GVYTyOZIZcBamhzB6auWTD1BM=",
   "packages": [
     {
       "packageVersion": "2026.07.31",
       "url": "materials/content-pack-v1.json",
       "sha256": "47e7f8925075cefd8d4110d6ebc1d912248964421f24c1823740dc5140579fbc",
+      "signature": "D5GE7uzm6wsk4+S5c6yGngJoHKyGnhltk9dEe8aik171yXA7fkxs17vtpezGuoczHiCfVEdCyt5N7TUaEndaAw==",
       "kind": "full"
     },
     {
       "packageVersion": "2026.09.01",
       "url": "materials/content-pack-v2.json",
       "sha256": "c85f99b42ebbadd52c3bf005dbfc736218363c776cd602837e0055fb8d91d465",
+      "signature": "ntjHIGrblvQLwbtRJLrLFGixViwhP8R3kJWuYgO1pq3N6obqm/I6iUCPWpmwpDpNNcDBAP4wE6yLyBTBPrZ+Ag==",
       "kind": "delta",
       "succeeds": "2026.07.31"
     }

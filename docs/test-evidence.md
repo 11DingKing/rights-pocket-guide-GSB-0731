@@ -4,12 +4,12 @@ All evidence below is produced by automated tests. Reproduce the whole matrix
 with:
 
 ```bash
-npm test          # vitest run — 31 tests, all green
+npm test          # vitest run — 40 tests, all green
 npm run build     # tsc -b (strict) + vite build
 npm run dev       # manual smoke at http://localhost:5173
 ```
 
-Latest run: **31 passed (5 files)**. Type-check (`tsc -b`) passes with `strict`,
+Latest run: **40 passed (7 files)**. Type-check (`tsc -b`) passes with `strict`,
 `noUncheckedIndexedAccess`, and `exactOptionalPropertyTypes`; the source
 contains no `any` and no non-null assertions.
 
@@ -64,32 +64,71 @@ by asserting both the text (`/更新未生效/`) and the glyph (`!`) are present
 
 ## 4. Update interruption & rollback (atomicity)
 
-Each stage is interrupted via an injected `stageHook`; the checksum and quota
-cases use corrupted bytes and a rejecting `commitActivePackage`. In **every**
-case the active pointer must still name the complete old version, and the new
-version's content must not be reachable — no mixing.
+Each stage is interrupted via an injected `stageHook`; the checksum, signature,
+and quota cases use corrupted bytes and a rejecting `promoteStaged`. In
+**every** case the active pointer must still name the complete old version, the
+new version's content must not be reachable, and the committed `packages` store
+must hold only complete versions — no mixing, no partial snapshot.
 
 | Interruption stage | Simulated fault | Post-condition | Evidence (test) |
 |--------------------|-----------------|----------------|-----------------|
 | `download` | throw before fetch completes | active = `2026.07.31`; `ART-AID-2` present, no redirect | `updateService.test.ts › rolls back cleanly when interrupted at "download"` |
 | `verify` | throw at checksum stage | active = `2026.07.31` | `… interrupted at "verify"` |
+| `signature` | throw at signature stage | active = `2026.07.31`; only old version committed | `… interrupted at "signature"` |
 | `parse` | throw at parse stage | active = `2026.07.31` | `… interrupted at "parse"` |
 | `resolve` | throw at resolve stage | active = `2026.07.31` | `… interrupted at "resolve"` |
 | `index` | throw at index stage | active = `2026.07.31` | `… interrupted at "index"` |
+| `stage` | throw entering staging | active = `2026.07.31`; nothing promoted | `… interrupted at "stage"` |
 | `commit` | throw entering commit | active = `2026.07.31`; new content absent | `… interrupted at "commit"` |
 | Checksum mismatch | corrupt v2 bytes | `UpdateError.stage === 'verify'`, active unchanged | `… treats a checksum mismatch as a failed download and keeps old version` |
-| **IndexedDB quota exceeded** | `commitActivePackage` rejects with `QuotaExceededError` | `UpdateError.stage === 'commit'`, active unchanged | `… survives a simulated IndexedDB quota error during commit` |
+| **Signature tampering** | flip a byte of v2's manifest signature | `UpdateError.stage === 'signature'`, active unchanged, only old version committed | `… rejects a tampered pack whose signature does not verify` |
+| **IndexedDB quota exceeded** | `promoteStaged` rejects with `QuotaExceededError` | `UpdateError.stage === 'commit'`, active unchanged | `… survives a simulated IndexedDB quota error during commit` |
 | Restart after failed update | interrupt at commit, reopen DB | complete old package only (`ART-AID-2` present, `ART-SERVICE-3` absent) | `… after a failed update, reopening the DB yields the complete old package` |
 
-The atomic switch lives in `PackageStore.commitActivePackage`
-(`src/storage/packageStore.ts`): the package `put` and the `active` pointer
-`put` share one `readwrite` transaction over both object stores, and
-`runTransaction` resolves only on `oncomplete` (commit), rejecting/aborting on
-error so nothing is half-written.
+Every interruption case also asserts `listVersions() === ['2026.07.31']` — the
+committed store never gains a half-written key. The atomic switch lives in
+`PackageStore.promoteStaged` (`src/storage/packageStore.ts`): it reads the
+active pointer, compare-and-sets against the caller's `expectedActive`, copies
+staged → `packages`, advances the pointer, and deletes the staged copy, all in
+ONE `readwrite` transaction over `staging`+`packages`+`meta`. `runTransaction`
+resolves only on `oncomplete` (commit), so nothing is half-written.
+
+Signature verification is a distinct stage layered on top of sha256: sha256
+catches corruption/truncation, Ed25519 (`src/core/signing.ts`, pinned public key
+from the manifest/bundled seed) catches tampering. A bad signature is treated
+exactly like a failed download — nothing is staged.
 
 ---
 
-## 5. Determinism across versions
+## 5. Concurrency — two tabs updating at once
+
+Each "tab" is a separate `PackageStore` connection to the same IndexedDB
+database. Both start from a complete v1 and race to install v2. The
+compare-and-set promotion serializes them: exactly one commits, and the loser's
+staged snapshot / temp metadata is pruned and never becomes visible.
+
+| Scenario | Expected | Evidence (test) |
+|----------|----------|-----------------|
+| Both tabs stage, then race the commit | exactly one promotes; loser fails with `UpdateError.stage === 'commit'` (StalePromotionError) | `concurrency.test.ts › commits exactly one version; the loser leaves nothing readable` |
+| After the race | active = `2026.09.01` for both connections; `listStaged() === []`; committed store has only complete versions | same test |
+| Loser's staged content | never reachable via repository/search/deep links (repository reads only the committed active package) | `concurrency.test.ts › a losing tab cannot expose staged content via search or deep links` |
+
+---
+
+## 6. v1 vs v2 comparison (same query, replacement relation, offline restart)
+
+Computed only from the committed active package, identically on every run.
+
+| Property | Expected | Evidence (test) |
+|----------|----------|-----------------|
+| Same query ranking for surviving article | `公证` ranks `ART-NOTARY-1` top with identical score in v1 and v2 | `comparison.test.ts › ranks a shared query identically for the surviving article` |
+| Changes isolated to changed content | v1 `渠道` → `ART-AID-2`; v2 drops `ART-AID-2`, adds `ART-SERVICE-3` (searchable by `上门`) | `comparison.test.ts › differs only where content changed` |
+| Withdrawn → replacement deep link | v1: `ART-AID-2` live, no migration; v2: `ART-AID-2 → ART-SERVICE-3`, identical every call | `comparison.test.ts › resolves the withdrawn→replacement deep link deterministically in v2 only` |
+| Offline restart visible set | v2 visible article set `= [ART-AID-1, ART-NOTARY-1, ART-SERVICE-3]`, identical across restarts, `ART-AID-2` absent | `comparison.test.ts › offline restart shows the complete, deterministic visible set` |
+
+---
+
+## 7. Determinism across versions
 
 | Property | Expected | Evidence (test) |
 |----------|----------|-----------------|
@@ -101,7 +140,7 @@ error so nothing is half-written.
 
 ---
 
-## 6. Reproducing the whole flow manually
+## 8. Reproducing the whole flow manually
 
 1. `npm install`
 2. `npm run dev` and open `http://localhost:5173`.

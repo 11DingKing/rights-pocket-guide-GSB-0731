@@ -6,15 +6,18 @@
  * Pipeline for reaching a target version:
  *   1. download   — fetch every pack in the chain (full base + deltas)
  *   2. verify      — sha256 each pack against the manifest; mismatch aborts
- *   3. parse       — validate JSON structure
- *   4. resolve     — fold the chain into one snapshot
- *   5. index       — build the deterministic search index
- *   6. commit      — write snapshot+index AND advance the active pointer in a
- *                    single IndexedDB transaction (atomic)
+ *   3. signature   — Ed25519-verify each pack against the pinned public key
+ *   4. parse       — validate JSON structure
+ *   5. resolve     — fold the chain into one snapshot
+ *   6. index       — build the deterministic search index
+ *   7. stage       — write the snapshot+index into the isolated staging store
+ *   8. commit      — promote staged → active via a compare-and-set switch
  *
- * If any step 1–5 fails, nothing is written and the previously active version
- * stays fully usable. If step 6 aborts (e.g. quota), the transaction rolls back
- * and the pointer still names the old complete version. Either way a restart
+ * If any step 1–7 fails, nothing visible is written and the previously active
+ * version stays fully usable; any staged bytes remain in the isolated staging
+ * store where search and deep links never look. The commit (step 8) is a
+ * single IndexedDB transaction that compare-and-sets the active pointer, so if
+ * two tabs race, only one promotes and the other aborts. Either way a restart
  * shows a complete old package or a complete new package, never a mix.
  *
  * A `stageHook` lets tests inject a failure at any stage and simulate quota.
@@ -23,17 +26,20 @@ import { buildIndex } from '../core/search/index';
 import { constantTimeEquals, sha256Hex } from '../core/checksum';
 import { parsePackageText } from '../core/parse';
 import { resolveChain } from '../core/resolve';
+import { importVerifyKey, verifySignature } from '../core/signing';
 import type { ParsedPackage, StoredPackage } from '../core/types';
-import type { PackageStore } from '../storage/packageStore';
+import { StalePromotionError, type PackageStore } from '../storage/packageStore';
 import type { TextFetcher } from './fetcher';
 import { chainTo, parseManifestText, type Manifest } from './manifest';
 
 export type UpdateStage =
   | 'download'
   | 'verify'
+  | 'signature'
   | 'parse'
   | 'resolve'
   | 'index'
+  | 'stage'
   | 'commit';
 
 export class UpdateError extends Error {
@@ -110,7 +116,8 @@ export async function updateTo(
 
   // 1. download
   await runStage(deps.stageHook, 'download');
-  const downloaded: Array<{ text: string; sha256: string }> = [];
+  const downloaded: Array<{ text: string; sha256: string; signature: string }> =
+    [];
   for (const entry of chain) {
     let text: string;
     try {
@@ -122,7 +129,7 @@ export async function updateTo(
         cause,
       );
     }
-    downloaded.push({ text, sha256: entry.sha256 });
+    downloaded.push({ text, sha256: entry.sha256, signature: entry.signature });
   }
 
   // 2. verify checksums
@@ -142,7 +149,32 @@ export async function updateTo(
     }
   }
 
-  // 3. parse
+  // 3. signature — Ed25519 against the pinned public key. A tampered pack that
+  // also rewrote the sha256 is caught here; a bad signature is treated exactly
+  // like a failed download and nothing is staged.
+  await runStage(deps.stageHook, 'signature');
+  let verifyKey: CryptoKey;
+  try {
+    verifyKey = await importVerifyKey(manifest.publicKey);
+  } catch (cause) {
+    throw new UpdateError('Invalid manifest public key', 'signature', cause);
+  }
+  for (let i = 0; i < chain.length; i += 1) {
+    const item = downloaded[i];
+    const entry = chain[i];
+    if (item === undefined || entry === undefined) {
+      throw new UpdateError('Internal chain mismatch', 'signature');
+    }
+    const ok = await verifySignature(verifyKey, item.text, item.signature);
+    if (!ok) {
+      throw new UpdateError(
+        `Signature verification failed for ${entry.packageVersion}`,
+        'signature',
+      );
+    }
+  }
+
+  // 4. parse
   await runStage(deps.stageHook, 'parse');
   const parsed: ParsedPackage[] = [];
   try {
@@ -153,7 +185,7 @@ export async function updateTo(
     throw new UpdateError('Failed to parse package', 'parse', cause);
   }
 
-  // 4. resolve
+  // 5. resolve
   await runStage(deps.stageHook, 'resolve');
   let snapshot;
   try {
@@ -162,7 +194,7 @@ export async function updateTo(
     throw new UpdateError('Failed to resolve package chain', 'resolve', cause);
   }
 
-  // 5. index
+  // 6. index
   await runStage(deps.stageHook, 'index');
   let index;
   try {
@@ -185,11 +217,34 @@ export async function updateTo(
     index,
   };
 
-  // 6. commit — atomic single transaction. Quota/interruption here rolls back.
+  // 7. stage — write into the isolated staging store. Interruptible; staged
+  // bytes are invisible to the repository, search, and deep links. A quota
+  // error here aborts staging without touching committed data.
+  await runStage(deps.stageHook, 'stage');
+  try {
+    await deps.store.stagePackage(stored);
+  } catch (cause) {
+    throw new UpdateError('Failed to stage package', 'stage', cause);
+  }
+
+  // 8. commit — promote staged → active with a compare-and-set on the active
+  // pointer. If another tab already advanced the pointer, this loses the race
+  // and aborts; the staged copy is pruned so it can never be read. Quota or
+  // interruption here rolls back the promotion transaction.
   await runStage(deps.stageHook, 'commit');
   try {
-    await deps.store.commitActivePackage(stored);
+    await deps.store.promoteStaged(snapshot.packageVersion, previousActive);
   } catch (cause) {
+    // Whether we lost the race or hit quota, drop our staged copy so nothing
+    // half-written is ever reachable. Pruning failures are non-fatal.
+    await deps.store.pruneStaging().catch(() => undefined);
+    if (cause instanceof StalePromotionError) {
+      throw new UpdateError(
+        `Lost concurrent update race for ${snapshot.packageVersion}`,
+        'commit',
+        cause,
+      );
+    }
     throw new UpdateError('Atomic commit failed', 'commit', cause);
   }
 
@@ -219,7 +274,16 @@ export async function ensureUpToDate(
     if (base === undefined) {
       throw new UpdateError('Manifest has no full base package', 'resolve');
     }
-    await updateTo(deps, manifest, base.packageVersion);
+    try {
+      await updateTo(deps, manifest, base.packageVersion);
+    } catch (cause) {
+      // Another tab may have installed the base concurrently. Only rethrow if
+      // we still have no complete active package.
+      const now = await deps.store.getActiveVersion();
+      if (now === undefined) {
+        throw cause;
+      }
+    }
   }
 
   try {

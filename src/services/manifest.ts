@@ -8,12 +8,14 @@ export interface ManifestEntry {
   readonly packageVersion: string;
   readonly url: string;
   readonly sha256: string;
+  readonly signature: string;
   readonly kind: 'full' | 'delta';
   readonly succeeds?: string;
 }
 
 export interface Manifest {
   readonly latest: string;
+  readonly publicKey: string;
   readonly packages: readonly ManifestEntry[];
 }
 
@@ -48,6 +50,7 @@ function parseEntry(value: unknown, path: string): ManifestEntry {
     packageVersion: str(value['packageVersion'], `${path}.packageVersion`),
     url: str(value['url'], `${path}.url`),
     sha256: str(value['sha256'], `${path}.sha256`),
+    signature: str(value['signature'], `${path}.signature`),
     kind,
     ...(succeeds === undefined
       ? {}
@@ -68,6 +71,7 @@ export function parseManifest(value: unknown): Manifest {
   );
   return {
     latest: str(value['latest'], 'latest'),
+    publicKey: str(value['publicKey'], 'publicKey'),
     packages,
   };
 }

@@ -43,20 +43,37 @@ materials/*.json ─► parse ─► resolve ─► index ─┐
 | Resolution | `src/core/resolve.ts` | Fold full + delta chain → one `ResolvedSnapshot`; withdrawals → redirects | no |
 | Indexing | `src/core/search/index.ts` | Deterministic inverted index + ranking | no |
 | Checksum | `src/core/checksum.ts` | SHA-256 verify (SubtleCrypto) | no |
-| Storage | `src/storage/*` | IndexedDB schema + **atomic switch** | **yes** |
-| Services | `src/services/*` | Orchestrate download→verify→parse→resolve→index→commit; manifest; repository | via storage only |
+| Signing | `src/core/signing.ts` | Ed25519 signature verify against pinned key | no |
+| Storage | `src/storage/*` | IndexedDB schema + staging + **atomic CAS switch** | **yes** |
+| Services | `src/services/*` | Orchestrate download→verify→signature→parse→resolve→index→stage→commit; manifest; repository | via storage only |
 | Views | `src/ui/*`, `src/app/*` | React reader; consume `ContentRepository` only | **no** |
 
-## Atomicity & rollback
+## Atomicity, rollback & concurrency
 
-The switch writes the new snapshot **and** advances the single `active` pointer
-inside **one** IndexedDB read/write transaction spanning both object stores
-(`packages`, `meta`). If anything aborts — download interrupted, checksum
-mismatch, parse/resolve/index failure, or a `QuotaExceededError` mid-commit —
-the transaction rolls back and the `active` pointer still names the previous
-**complete** version. Downstream reads only ever load the package the pointer
-names, so a restart shows a complete old package **or** a complete new package,
-never a mix.
+IndexedDB has three object stores: `packages` (committed snapshots), `staging`
+(uncommitted work), and `meta` (the single `active` pointer + settings). An
+update is staged into `staging` first — invisible to the repository, search, and
+deep links — then promoted:
+
+`PackageStore.promoteStaged` runs **one** `readwrite` transaction over all three
+stores that (1) reads the current `active` pointer, (2) **compare-and-sets**
+against the caller's `expectedActive` and aborts if it moved, (3) copies staged →
+`packages`, (4) advances `active`, (5) deletes the staged copy. If any step
+aborts — download/checksum/signature/parse/resolve/index/stage failure, a
+`QuotaExceededError`, or a lost race — nothing visible changes and `active` still
+names the previous **complete** version.
+
+Because IndexedDB serializes `readwrite` transactions over `meta`, **two tabs**
+racing to update are ordered: the first advances the pointer and commits; the
+second's compare-and-set sees the moved pointer, aborts, and prunes its staged
+copy. Exactly one version commits; the loser's staged chunks/index/temp metadata
+are never reachable. A restart always shows a complete old package **or** a
+complete new package — never a mix.
+
+Packages are verified twice before staging: **sha256** (corruption/truncation)
+and **Ed25519 signature** against a public key pinned in the manifest and the
+bundled seed (tampering). `scripts/build-manifest.mjs` signs each pack at build
+time.
 
 ## Content model
 

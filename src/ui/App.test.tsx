@@ -8,37 +8,12 @@ import { bootstrap, type BootstrapResult } from '../services/bootstrap';
 import { BundledFetcher } from '../services/fetcher';
 import { PackageStore } from '../storage/packageStore';
 import { App } from './App';
-import v1 from '../../materials/content-pack-v1.json';
-import v2 from '../../materials/content-pack-v2.json';
-import { createHash } from 'node:crypto';
-
-const v1Text = JSON.stringify(v1);
-const v2Text = JSON.stringify(v2);
-const sha = (t: string): string =>
-  createHash('sha256').update(t, 'utf8').digest('hex');
-
-const manifestText = JSON.stringify({
-  latest: '2026.09.01',
-  packages: [
-    {
-      packageVersion: '2026.07.31',
-      url: 'materials/content-pack-v1.json',
-      sha256: sha(v1Text),
-      kind: 'full',
-    },
-    {
-      packageVersion: '2026.09.01',
-      url: 'materials/content-pack-v2.json',
-      sha256: sha(v2Text),
-      kind: 'delta',
-      succeeds: '2026.07.31',
-    },
-  ],
-});
-const packTexts: Record<string, string> = {
-  'content-pack-v1.json': v1Text,
-  'content-pack-v2.json': v2Text,
-};
+import {
+  baseOnlyManifestText,
+  manifestText,
+  packTexts,
+  v2Text,
+} from '../test/fixtures';
 
 async function boot(): Promise<BootstrapResult> {
   const store = await PackageStore.open();
@@ -210,21 +185,10 @@ describe('reading settings persistence', () => {
 describe('offline update failure surfaces the old version', () => {
   it('keeps the complete old package and shows a non-colour-only warning', async () => {
     // Session 1: seed v1 only (manifest advertises only the full base).
-    const baseManifest = JSON.stringify({
-      latest: '2026.07.31',
-      packages: [
-        {
-          packageVersion: '2026.07.31',
-          url: 'materials/content-pack-v1.json',
-          sha256: sha(v1Text),
-          kind: 'full',
-        },
-      ],
-    });
     const store1 = await PackageStore.open();
     await bootstrap({
       store: store1,
-      fetcher: new BundledFetcher(baseManifest, packTexts),
+      fetcher: new BundledFetcher(baseOnlyManifestText, packTexts),
       manifestUrl: 'materials/manifest.json',
     });
     store1.close();

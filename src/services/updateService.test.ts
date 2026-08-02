@@ -11,41 +11,7 @@ import {
   type UpdateDeps,
   type UpdateStage,
 } from '../services/updateService';
-import v1 from '../../materials/content-pack-v1.json';
-import v2 from '../../materials/content-pack-v2.json';
-import { createHash } from 'node:crypto';
-
-const v1Text = JSON.stringify(v1);
-const v2Text = JSON.stringify(v2);
-
-function sha256(text: string): string {
-  return createHash('sha256').update(text, 'utf8').digest('hex');
-}
-
-// Build a manifest whose checksums match the JSON we serialize here.
-const manifestText = JSON.stringify({
-  latest: '2026.09.01',
-  packages: [
-    {
-      packageVersion: '2026.07.31',
-      url: 'materials/content-pack-v1.json',
-      sha256: sha256(v1Text),
-      kind: 'full',
-    },
-    {
-      packageVersion: '2026.09.01',
-      url: 'materials/content-pack-v2.json',
-      sha256: sha256(v2Text),
-      kind: 'delta',
-      succeeds: '2026.07.31',
-    },
-  ],
-});
-
-const packTexts: Record<string, string> = {
-  'content-pack-v1.json': v1Text,
-  'content-pack-v2.json': v2Text,
-};
+import { manifestText, packTexts, v2Text } from '../test/fixtures';
 
 /** Reset the global IndexedDB between tests so restarts are isolated. */
 function freshIndexedDb(): void {
@@ -91,9 +57,11 @@ describe('atomic package switching and rollback', () => {
   const stages: UpdateStage[] = [
     'download',
     'verify',
+    'signature',
     'parse',
     'resolve',
     'index',
+    'stage',
     'commit',
   ];
 
@@ -125,8 +93,40 @@ describe('atomic package switching and rollback', () => {
       expect(active?.snapshot.articles['ART-AID-2']).toBeDefined();
       expect(active?.snapshot.redirects['ART-AID-2']).toBeUndefined();
       expect(active?.snapshot.articles['ART-SERVICE-3']).toBeUndefined();
+      // The committed packages store holds only the old version — any staged
+      // bytes from the failed attempt are never promoted into it.
+      expect(await store.listVersions()).toEqual(['2026.07.31']);
     });
   }
+
+  it('rejects a tampered pack whose signature does not verify', async () => {
+    const store = await PackageStore.open();
+    await updateTo(makeDeps(store), await fetchManifest(makeDeps(store)), '2026.07.31');
+
+    // Swap in a well-formed but differently-signed v2 by re-signing with the
+    // WRONG key: reuse another version's signature so sha256 still matches only
+    // if we also fix it. Simplest: corrupt the signature bytes in the manifest.
+    const tampered = JSON.parse(manifestText) as {
+      packages: Array<{ packageVersion: string; signature: string }>;
+    };
+    const v2Entry = tampered.packages.find(
+      (p) => p.packageVersion === '2026.09.01',
+    );
+    if (v2Entry !== undefined) {
+      v2Entry.signature = v2Entry.signature.replace(/^./, (c) =>
+        c === 'A' ? 'B' : 'A',
+      );
+    }
+    const corruptFetcher = new BundledFetcher(JSON.stringify(tampered), packTexts);
+    const deps = makeDeps(store, { fetcher: corruptFetcher });
+    const manifest = await fetchManifest(deps);
+    const err = await updateTo(deps, manifest, '2026.09.01').catch((e) => e);
+    expect(err).toBeInstanceOf(UpdateError);
+    expect((err as UpdateError).stage).toBe('signature');
+    // Old version intact; nothing staged is readable.
+    expect(await store.getActiveVersion()).toBe('2026.07.31');
+    expect(await store.listVersions()).toEqual(['2026.07.31']);
+  });
 
   it('treats a checksum mismatch as a failed download and keeps old version', async () => {
     const store = await PackageStore.open();
@@ -149,11 +149,11 @@ describe('atomic package switching and rollback', () => {
     const store = await PackageStore.open();
     await updateTo(makeDeps(store), await fetchManifest(makeDeps(store)), '2026.07.31');
 
-    // Wrap the store so the commit transaction throws a QuotaExceededError,
+    // Wrap the store so the promotion transaction throws a QuotaExceededError,
     // emulating staging that runs out of space. The pointer must not move.
     const quotaError = new DOMException('quota', 'QuotaExceededError');
     const failingStore = Object.create(store) as PackageStore;
-    Object.defineProperty(failingStore, 'commitActivePackage', {
+    Object.defineProperty(failingStore, 'promoteStaged', {
       value: () => Promise.reject(quotaError),
     });
     const deps = makeDeps(failingStore);

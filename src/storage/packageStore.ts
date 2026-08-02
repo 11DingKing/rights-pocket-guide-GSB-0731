@@ -1,30 +1,53 @@
 /**
  * Offline storage layer. Owns the IndexedDB schema and the *atomic* package
- * switch. Two object stores:
+ * switch. Three object stores:
  *
- *  - `packages`  keyPath "packageVersion" — one fully resolved+indexed
- *                snapshot per version.
- *  - `meta`      keyPath "key" — holds the single "active" pointer and the
- *                reading "settings". The active pointer is what makes a version
- *                visible; nothing reads a package that the pointer doesn't name.
+ *  - `packages`  keyPath "packageVersion" — committed, fully resolved+indexed
+ *                snapshots. Only versions reachable through the active pointer
+ *                are ever read by the repository.
+ *  - `staging`   keyPath "packageVersion" — work-in-progress snapshots written
+ *                during an update BEFORE they are promoted. Nothing outside this
+ *                module ever reads `staging`: search, deep links, and the
+ *                repository only see `packages` via the active pointer. A failed
+ *                update's staged chunks/index/temp metadata therefore remain
+ *                invisible.
+ *  - `meta`      keyPath "key" — the single "active" pointer and reading
+ *                "settings".
  *
- * The switch is atomic because writing the new package AND advancing the active
- * pointer happen inside one read/write transaction spanning both stores. If the
- * transaction aborts for any reason (download/checksum aborted earlier so we
- * never reach here, quota exceeded mid-write, tab closed before commit) the
- * pointer keeps naming the previous complete version. Restart therefore always
- * shows a complete old package or a complete new package — never a mix.
+ * Atomic switch: `promoteStaged` moves a staged snapshot into `packages` AND
+ * advances the active pointer inside ONE readwrite transaction spanning all
+ * three stores. The promotion is a compare-and-set: it reads the current active
+ * pointer inside that same transaction and aborts unless it equals the caller's
+ * `expectedActive`. Because IndexedDB serializes readwrite transactions over the
+ * `meta` store, two tabs racing to promote are ordered: the first advances the
+ * pointer and commits; the second observes the already-advanced pointer, fails
+ * its compare-and-set, and its transaction aborts. Exactly one version commits,
+ * and a restart shows a complete old package or a complete new package.
  */
 import type { ReadingSettings, StoredPackage } from '../core/types';
 import { DEFAULT_READING_SETTINGS } from '../core/types';
 import { awaitRequest, openDatabase, runTransaction } from './idb';
 
 export const DB_NAME = 'rights-pocket-guide';
-export const DB_VERSION = 1;
+export const DB_VERSION = 2;
 const STORE_PACKAGES = 'packages';
+const STORE_STAGING = 'staging';
 const STORE_META = 'meta';
 const KEY_ACTIVE = 'active';
 const KEY_SETTINGS = 'settings';
+
+/** Thrown when a compare-and-set promotion loses the race (pointer moved). */
+export class StalePromotionError extends Error {
+  constructor(
+    readonly expected: string | undefined,
+    readonly found: string | undefined,
+  ) {
+    super(
+      `Promotion lost race: expected active "${expected ?? '<none>'}" but found "${found ?? '<none>'}"`,
+    );
+    this.name = 'StalePromotionError';
+  }
+}
 
 interface ActiveRecord {
   readonly key: typeof KEY_ACTIVE;
@@ -62,6 +85,11 @@ export class PackageStore {
     const db = await openDatabase(DB_NAME, DB_VERSION, (database) => {
       if (!database.objectStoreNames.contains(STORE_PACKAGES)) {
         database.createObjectStore(STORE_PACKAGES, {
+          keyPath: 'packageVersion',
+        });
+      }
+      if (!database.objectStoreNames.contains(STORE_STAGING)) {
+        database.createObjectStore(STORE_STAGING, {
           keyPath: 'packageVersion',
         });
       }
@@ -130,34 +158,88 @@ export class PackageStore {
     });
   }
 
+  /** Versions currently sitting in staging (uncommitted work). */
+  async listStaged(): Promise<string[]> {
+    return runTransaction(this.db, [STORE_STAGING], 'readonly', async (tx) => {
+      const keys = await awaitRequest<IDBValidKey[]>(
+        tx.objectStore(STORE_STAGING).getAllKeys(),
+      );
+      return keys.filter((k): k is string => typeof k === 'string').sort();
+    });
+  }
+
   /**
-   * Atomically install a package and make it active in a single transaction.
-   * Either both the package write and the pointer advance commit, or neither
-   * does. A quota error while writing the (potentially large) package aborts
-   * the whole transaction, leaving the previous active version fully intact.
+   * Write a resolved+indexed snapshot into the isolated staging store. This is
+   * safe to interrupt: staged data is never read by the repository, search, or
+   * deep links, and is only made visible by a later successful `promoteStaged`.
+   * A quota error here aborts the staging transaction without touching the
+   * committed `packages` store or the active pointer.
    */
-  async commitActivePackage(pkg: StoredPackage): Promise<void> {
+  async stagePackage(pkg: StoredPackage): Promise<void> {
+    await runTransaction(this.db, [STORE_STAGING], 'readwrite', async (tx) => {
+      await awaitRequest(tx.objectStore(STORE_STAGING).put(pkg));
+    });
+  }
+
+  /**
+   * Atomically promote a staged version to active with a compare-and-set on the
+   * active pointer. In ONE transaction:
+   *   1. read the current active pointer;
+   *   2. abort (StalePromotionError) unless it equals `expectedActive`;
+   *   3. copy the staged snapshot into `packages`;
+   *   4. advance the active pointer;
+   *   5. delete the staged copy.
+   * If any step fails, the whole transaction rolls back — the previous active
+   * version stays complete and the staged copy remains only in `staging`.
+   */
+  async promoteStaged(
+    version: string,
+    expectedActive: string | undefined,
+  ): Promise<void> {
     await runTransaction(
       this.db,
-      [STORE_PACKAGES, STORE_META],
+      [STORE_STAGING, STORE_PACKAGES, STORE_META],
       'readwrite',
       async (tx) => {
-        // Write the full snapshot first; if this exceeds quota the transaction
-        // aborts before the pointer is touched.
-        await awaitRequest(tx.objectStore(STORE_PACKAGES).put(pkg));
+        const meta = tx.objectStore(STORE_META);
+        const current = await awaitRequest<unknown>(meta.get(KEY_ACTIVE));
+        const found = isActiveRecord(current)
+          ? current.packageVersion
+          : undefined;
+        if (found !== expectedActive) {
+          // Lost the race (another tab already switched). Abort without
+          // touching packages or the pointer.
+          throw new StalePromotionError(expectedActive, found);
+        }
+
+        const staged = await awaitRequest<unknown>(
+          tx.objectStore(STORE_STAGING).get(version),
+        );
+        if (staged === undefined) {
+          throw new Error(`No staged package for version "${version}"`);
+        }
+        await awaitRequest(tx.objectStore(STORE_PACKAGES).put(staged));
         const active: ActiveRecord = {
           key: KEY_ACTIVE,
-          packageVersion: pkg.packageVersion,
+          packageVersion: version,
         };
-        await awaitRequest(tx.objectStore(STORE_META).put(active));
+        await awaitRequest(meta.put(active));
+        await awaitRequest(tx.objectStore(STORE_STAGING).delete(version));
       },
     );
   }
 
+  /** Drop all staged (uncommitted) snapshots. Never affects committed data. */
+  async pruneStaging(): Promise<void> {
+    await runTransaction(this.db, [STORE_STAGING], 'readwrite', async (tx) => {
+      await awaitRequest(tx.objectStore(STORE_STAGING).clear());
+    });
+  }
+
   /**
-   * Remove packages that are not the active version. Safe to call after a
-   * successful switch; runs in its own transaction so a failure here never
-   * affects the active pointer.
+   * Remove committed packages that are not the active version. Safe to call
+   * after a successful switch; runs in its own transaction so a failure here
+   * never affects the active pointer.
    */
   async pruneInactive(): Promise<void> {
     const active = await this.getActiveVersion();
