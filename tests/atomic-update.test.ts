@@ -1,7 +1,8 @@
 import { describe, expect, it, beforeEach, afterEach } from 'vitest';
 import { ContentService, UpdateAbortedError } from '../src/services/contentService';
 import { QuotaExceededStorageError } from '../src/storage/db';
-import type { ContentRepository } from '../src/storage/repository';
+import { ContentRepository } from '../src/storage/repository';
+import { SearchIndex } from '../src/search';
 import type { MaterializedPack, UpdatePhase } from '../src/types';
 import {
   createRepository,
@@ -115,10 +116,13 @@ describe('atomic update', () => {
   });
 
   it.each([
-    ['downloading', 'verifying'],
-    ['indexing', 'committing'],
-  ] as ReadonlyArray<ReadonlyArray<UpdatePhase>>)(
-    'discards staging and keeps v1 when interrupted at %s',
+    'downloading',
+    'verifying',
+    'staging',
+    'indexing',
+    'committing',
+  ] as ReadonlyArray<UpdatePhase>)(
+    'discards staged data and keeps the complete v1 when interrupted at %s',
     async (phase) => {
       const service = await freshService();
       await expect(
@@ -139,6 +143,36 @@ describe('atomic update', () => {
       expect(v2InDb).toBeNull();
     },
   );
+
+  it('keeps the complete v1 when the download is aborted mid-flight via AbortSignal', async () => {
+    const service = await freshService();
+    const controller = new AbortController();
+    const downloader = (
+      _url: string,
+      signal: AbortSignal,
+    ): Promise<Uint8Array> =>
+      new Promise<Uint8Array>((_resolve, reject) => {
+        if (signal.aborted) {
+          reject(new DOMException('Aborted', 'AbortError'));
+          return;
+        }
+        signal.addEventListener(
+          'abort',
+          () => reject(new DOMException('Aborted', 'AbortError')),
+          { once: true },
+        );
+        controller.abort();
+      });
+    await expect(
+      service.checkUpdate('/content-pack-v2.json', {
+        expectedChecksum: await expectedV2Checksum(),
+        downloader,
+        signal: controller.signal,
+      }),
+    ).rejects.toBeDefined();
+    expectV1(service);
+    expect(await repository.getStagedVersion()).toBeNull();
+  });
 
   it('exposes only the old pack right up to the atomic commit', async () => {
     const service = await freshService();
@@ -249,5 +283,113 @@ describe('service factory helper smoke test', () => {
       await deleteDatabase();
     }
     repository = await createRepository();
+  });
+});
+
+describe('cross-version determinism: v1 vs v2', () => {
+  function sortedArticleIds(pack: MaterializedPack): string[] {
+    return Object.keys(pack.articles).sort();
+  }
+
+  it('produces deterministic search rankings for identical queries within each version', () => {
+    const v1 = seedPack();
+    const v2 = materializeV2(v1);
+    const indexV1a = new SearchIndex(v1);
+    const indexV1b = new SearchIndex(v1);
+    const indexV2a = new SearchIndex(v2);
+    const indexV2b = new SearchIndex(v2);
+
+    for (const query of ['服务', '法律援助', '上门', '公证']) {
+      const r1a = indexV1a.search(query).map((h) => h.articleId);
+      const r1b = indexV1b.search(query).map((h) => h.articleId);
+      const r2a = indexV2a.search(query).map((h) => h.articleId);
+      const r2b = indexV2b.search(query).map((h) => h.articleId);
+      expect(r1a).toEqual(r1b);
+      expect(r2a).toEqual(r2b);
+    }
+  });
+
+  it('removes the withdrawn article from rankings and surfaces the replacement', () => {
+    const v1 = seedPack();
+    const v2 = materializeV2(v1);
+    const indexV1 = new SearchIndex(v1);
+    const indexV2 = new SearchIndex(v2);
+
+    const v1Hits = indexV1.search('行动不便').map((h) => h.articleId);
+    const v2Hits = indexV2.search('行动不便').map((h) => h.articleId);
+
+    expect(v1Hits).toContain('ART-AID-2');
+    expect(v2Hits).not.toContain('ART-AID-2');
+    expect(v2Hits).toContain('ART-SERVICE-3');
+
+    expect(v2.withdrawals['ART-AID-2']?.replacementArticleId).toBe(
+      'ART-SERVICE-3',
+    );
+    expect(v2.articles['ART-SERVICE-3']).toBeDefined();
+    expect(v2.articles['ART-AID-2']).toBeUndefined();
+  });
+
+  it('exposes a complete and deterministic visible set after an offline restart', async () => {
+    const v1 = seedPack();
+    const v2 = materializeV2(v1);
+    const expectedV1 = sortedArticleIds(v1);
+    const expectedV2 = sortedArticleIds(v2);
+
+    expect(expectedV1).toEqual(['ART-AID-1', 'ART-AID-2', 'ART-NOTARY-1']);
+    expect(expectedV2).toEqual(['ART-AID-1', 'ART-NOTARY-1', 'ART-SERVICE-3']);
+
+    const service = await freshService();
+    expect(sortedArticleIds(service.getState().pack as MaterializedPack)).toEqual(
+      expectedV1,
+    );
+
+    await service.checkUpdate('/content-pack-v2.json', {
+      expectedChecksum: await expectedV2Checksum(),
+      downloader: bytesDownloader(loadV2Bytes()),
+    });
+    expect(sortedArticleIds(service.getState().pack as MaterializedPack)).toEqual(
+      expectedV2,
+    );
+
+    repository.close();
+    const restartedRepo = await ContentRepository.open();
+    const restarted = new ContentService(restartedRepo);
+    await restarted.initialize(v1);
+
+    try {
+      const state = restarted.getState();
+      expect(state.pack?.packageVersion).toBe('2026.09.01');
+      expect(sortedArticleIds(state.pack as MaterializedPack)).toEqual(
+        expectedV2,
+      );
+      expect(await restartedRepo.getStagedVersion()).toBeNull();
+      expect(await restartedRepo.getPreviousVersion()).toBe('2026.07.31');
+      expect(
+        state.index?.search('行动不便').map((h) => h.articleId),
+      ).not.toContain('ART-AID-2');
+      expect(state.index?.search('上门服务')[0]?.articleId).toBe(
+        'ART-SERVICE-3',
+      );
+    } finally {
+      restartedRepo.close();
+    }
+    repository = await createRepository();
+  });
+
+  it('rolls back to a complete v1 visible set after v2 was active', async () => {
+    const service = await freshService();
+    await service.checkUpdate('/content-pack-v2.json', {
+      expectedChecksum: await expectedV2Checksum(),
+      downloader: bytesDownloader(loadV2Bytes()),
+    });
+    await service.rollback();
+    const state = service.getState();
+    expect(state.pack?.packageVersion).toBe('2026.07.31');
+    expect(sortedArticleIds(state.pack as MaterializedPack)).toEqual(
+      sortedArticleIds(seedPack()),
+    );
+    const hits = state.index?.search('行动不便').map((h) => h.articleId) ?? [];
+    expect(hits).toContain('ART-AID-2');
+    expect(hits).not.toContain('ART-SERVICE-3');
   });
 });

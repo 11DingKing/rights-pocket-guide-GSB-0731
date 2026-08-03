@@ -14,7 +14,11 @@ import {
 import { verifyChecksum, ChecksumError } from "../content/checksum";
 import { SearchIndex } from "../search";
 import type { ContentRepository } from "../storage/repository";
-import { QuotaExceededStorageError, StorageError } from "../storage/db";
+import {
+  QuotaExceededStorageError,
+  StorageError,
+  UpdateConflictError,
+} from "../storage/db";
 
 export class UpdateAbortedError extends Error {
   constructor(message: string) {
@@ -146,6 +150,13 @@ export class ContentService {
     const signal = options.signal;
     const onPhase = options.onPhase;
     let stagedVersion: string | null = null;
+    const expectedBaseVersion = this.pack?.packageVersion ?? null;
+
+    if (expectedBaseVersion === null) {
+      throw new StorageError("无法更新：当前没有活动版本");
+    }
+
+    let candidate: MaterializedPack | null = null;
 
     try {
       this.setStatus({
@@ -178,51 +189,84 @@ export class ContentService {
       onPhase?.("resolving");
       const rawText = new TextDecoder().decode(bytes);
       const rawPack = parseRawPack(rawText);
-      const candidate = this.materializeCandidate(rawPack);
+      const resolved = this.materializeCandidate(rawPack);
+      candidate = resolved;
       this.throwIfAborted(signal, "归并后已中断");
 
       this.setStatus({
         phase: "staging",
         message: "正在暂存新版本…",
-        newVersion: candidate.packageVersion,
+        newVersion: resolved.packageVersion,
       });
       onPhase?.("staging");
-      await this.repository.stage(candidate);
-      stagedVersion = candidate.packageVersion;
+      await this.repository.stage(resolved);
+      stagedVersion = resolved.packageVersion;
       this.throwIfAborted(signal, "暂存后已中断");
 
       this.setStatus({
         phase: "indexing",
         message: "正在构建检索索引…",
-        newVersion: candidate.packageVersion,
+        newVersion: resolved.packageVersion,
       });
       onPhase?.("indexing");
-      const candidateIndex = new SearchIndex(candidate);
+      const candidateIndex = new SearchIndex(resolved);
       this.throwIfAborted(signal, "索引构建后已中断");
 
       this.setStatus({
         phase: "committing",
         message: "正在原子切换版本…",
-        newVersion: candidate.packageVersion,
+        newVersion: resolved.packageVersion,
       });
       onPhase?.("committing");
-      await this.repository.commit(candidate);
+      await this.repository.commit(resolved, expectedBaseVersion);
       this.throwIfAborted(signal, "提交后已中断");
 
       const oldVersion = this.pack?.packageVersion ?? null;
-      this.pack = candidate;
+      this.pack = resolved;
       this.index = candidateIndex;
       this.previousVersion = oldVersion;
       this.setStatus({
         phase: "success",
-        message: `已更新到版本 ${candidate.packageVersion}`,
-        newVersion: candidate.packageVersion,
+        message: `已更新到版本 ${resolved.packageVersion}`,
+        newVersion: resolved.packageVersion,
       });
-      return candidate;
+      return resolved;
     } catch (error) {
+      if (error instanceof UpdateConflictError && candidate !== null) {
+        const activePack = await this.repository.getActivePack();
+        if (activePack?.packageVersion === candidate.packageVersion) {
+          this.pack = activePack;
+          this.index = new SearchIndex(activePack);
+          this.previousVersion = error.expectedBaseVersion;
+          this.setStatus({
+            phase: "success",
+            message: `已由其他标签页更新到版本 ${activePack.packageVersion}`,
+            newVersion: activePack.packageVersion,
+          });
+          return activePack;
+        }
+        try {
+          await this.repository.discardStagedCandidate(
+            candidate.packageVersion,
+          );
+        } catch {
+          // 丢弃失败时由下次 initialize 的孤儿包清理兜底。
+        }
+        if (activePack !== null) {
+          this.pack = activePack;
+          this.index = new SearchIndex(activePack);
+        }
+        this.setStatus({
+          phase: "failed",
+          message: `另一个标签页已提交版本 ${error.currentVersion}，本次更新未生效，仍完整使用已提交版本。`,
+          newVersion: null,
+        });
+        throw error;
+      }
+
       if (stagedVersion !== null) {
         try {
-          await this.repository.discardStaging();
+          await this.repository.discardStagedCandidate(stagedVersion);
         } catch {
           // 丢弃暂存失败不应掩盖原始错误；暂存区会在下次初始化时清理。
         }

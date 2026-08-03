@@ -14,6 +14,19 @@ export class QuotaExceededStorageError extends StorageError {
   }
 }
 
+export class UpdateConflictError extends StorageError {
+  readonly currentVersion: string;
+  readonly expectedBaseVersion: string;
+  constructor(currentVersion: string, expectedBaseVersion: string) {
+    super(
+      `提交冲突：当前活动版本为 ${currentVersion}，预期基础版本为 ${expectedBaseVersion}`,
+    );
+    this.name = 'UpdateConflictError';
+    this.currentVersion = currentVersion;
+    this.expectedBaseVersion = expectedBaseVersion;
+  }
+}
+
 const DB_NAME = 'rights-pocket-guide';
 const DB_VERSION = 3;
 

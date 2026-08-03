@@ -7,7 +7,7 @@
 ```bash
 npm install
 npm run typecheck   # tsc -b --noEmit，strict + noUncheckedIndexedAccess
-npm test            # vitest run，7 个测试文件 / 57 个用例
+npm test            # vitest run，8 个测试文件 / 68 个用例（含两标签页并发）
 npm run build       # tsc -b && vite build
 npm run dev         # 原生浏览器验收：http://localhost:5173/
 ```
@@ -60,21 +60,35 @@ npm run dev         # 原生浏览器验收：http://localhost:5173/
 | # | 场景 | 复现（测试名 / 文件） | 旧版本保持完整的证据 | 结果 |
 |---|---|---|---|---|
 | U1 | 首次离线启动（无网络） | `boots offline from the bundled seed without any network` [atomic-update.test.ts](tests/atomic-update.test.ts) | 用捆绑种子初始化后 `fetch` 未被调用；更新失败后仍为 v1 | ✅ |
-| U2 | 下载阶段中断 | `keeps the complete old version when download is interrupted` [atomic-update.test.ts](tests/atomic-update.test.ts) | `downloader` reject 后 `activeVersion` 仍为 v1，无 `stagedVersion` | ✅ |
-| U3 | 校验阶段失败（校验和不符） | `keeps the complete old version when checksum mismatches` [atomic-update.test.ts](tests/atomic-update.test.ts) | 状态 phase=`failed` 且消息含“完整性”；v1 文章可检索 | ✅ |
-| U4 | `verifying` 阶段中断 | `discards staging and keeps v1 when interrupted at verifying` [atomic-update.test.ts](tests/atomic-update.test.ts) | `onPhase` 抛 `UpdateAbortedError`；无暂存、无新包 | ✅ |
-| U5 | `indexing` 阶段中断（已暂存后） | `discards staging and keeps v1 when interrupted at indexing` [atomic-update.test.ts](tests/atomic-update.test.ts) | 暂存被 `discardStaging` 清理，`getPack('2026.09.01')` 为 `null` | ✅ |
-| U6 | `committing` 阶段中断 | `discards staging and keeps v1 when interrupted at committing` [atomic-update.test.ts](tests/atomic-update.test.ts) | 提交前中断，活动版本仍为 v1 | ✅ |
-| U7 | IndexedDB 配额不足（暂存期间） | `keeps the complete old version when IndexedDB quota is exceeded during staging` [atomic-update.test.ts](tests/atomic-update.test.ts) | 注入 `QuotaExceededStorageError`；phase=failed，消息含“存储空间”，v1 不变 | ✅ |
-| U8 | 提交前一刻视图仍只见旧包 | `exposes only the old pack right up to the atomic commit` [atomic-update.test.ts](tests/atomic-update.test.ts) | 在 `committing` 回调内读取 state，`packageVersion` 仍为 `2026.07.31` | ✅ |
-| U9 | 模拟崩溃/重启后清理暂存 | `cleans up interrupted staging on restart and shows only the complete old pack` [atomic-update.test.ts](tests/atomic-update.test.ts) | 新 `ContentService.initialize` 后 `stagedVersion=null`、新包被删除，只呈现 v1 | ✅ |
-| U10 | 成功原子切换并重建索引 | `switches from v1 to v2 atomically and rebuilds the index` [atomic-update.test.ts](tests/atomic-update.test.ts) | v2 中 `ART-AID-2` 消失、`ART-SERVICE-3` 可检索，撤下映射保留 | ✅ |
-| U11 | 阶段顺序确定 | `emits phase announcements in order` [atomic-update.test.ts](tests/atomic-update.test.ts) | 阶段严格为 downloading→verifying→resolving→staging→indexing→committing | ✅ |
-| U12 | 仓储原子提交/丢弃/重启清理 | storage [storage.test.ts](tests/storage.test.ts) | 9 个用例覆盖 seed、stage+commit、discard、rollback、设置持久化、重启清理 | ✅ |
+| U2 | **下载阶段中断**（onPhase 注入） | `discards staged data and keeps the complete v1 when interrupted at downloading` [atomic-update.test.ts](tests/atomic-update.test.ts) | `onPhase('downloading')` 抛 `UpdateAbortedError`；`activeVersion` 仍为 v1，无新包 | ✅ |
+| U3 | 下载中途 `AbortSignal` 中断 | `keeps the complete v1 when the download is aborted mid-flight via AbortSignal` [atomic-update.test.ts](tests/atomic-update.test.ts) | 下载器以 `AbortError` reject；phase=failed，v1 不变，无 `stagedVersion` | ✅ |
+| U4 | **签名/哈希校验阶段中断** | `…interrupted at verifying` [atomic-update.test.ts](tests/atomic-update.test.ts) | `onPhase('verifying')` 中断；校验前终止，无暂存、无新包 | ✅ |
+| U5 | 校验和不符（哈希校验失败） | `keeps the complete old version when checksum mismatches` [atomic-update.test.ts](tests/atomic-update.test.ts) | 状态 phase=`failed` 且消息含“完整性”；v1 文章可检索 | ✅ |
+| U6 | **暂存阶段中断** | `…interrupted at staging` [atomic-update.test.ts](tests/atomic-update.test.ts) | `onPhase('staging')` 在写入前中断；活动版本仍为 v1，无新包 | ✅ |
+| U7 | **索引构建阶段中断**（已暂存后） | `…interrupted at indexing` [atomic-update.test.ts](tests/atomic-update.test.ts) | 候选包已写入暂存；中断后 `discardStagedCandidate` 删除，`getPack('2026.09.01')` 为 `null` | ✅ |
+| U8 | **原子切换阶段中断** | `…interrupted at committing` [atomic-update.test.ts](tests/atomic-update.test.ts) | `onPhase('committing')` 在提交前中断；候选被丢弃，活动版本仍为 v1 | ✅ |
+| U9 | IndexedDB 配额不足（暂存期间） | `keeps the complete old version when IndexedDB quota is exceeded during staging` [atomic-update.test.ts](tests/atomic-update.test.ts) | 注入 `QuotaExceededStorageError`；phase=failed，消息含“存储空间”，v1 不变 | ✅ |
+| U10 | 提交前一刻视图仍只见旧包 | `exposes only the old pack right up to the atomic commit` [atomic-update.test.ts](tests/atomic-update.test.ts) | 在 `committing` 回调内读取 state，`packageVersion` 仍为 `2026.07.31` | ✅ |
+| U11 | 模拟崩溃/重启后清理暂存与孤儿包 | `cleans up interrupted staging on restart and shows only the complete old pack` [atomic-update.test.ts](tests/atomic-update.test.ts)、storage `cleans up an interrupted staging on initialize` | 新 `ContentService.initialize` 后 `stagedVersion=null`、暂存/孤儿包被删除，只呈现完整旧包 | ✅ |
+| U12 | 成功原子切换并重建索引 | `switches from v1 to v2 atomically and rebuilds the index` [atomic-update.test.ts](tests/atomic-update.test.ts) | v2 中 `ART-AID-2` 消失、`ART-SERVICE-3` 可检索，撤下映射保留 | ✅ |
+| U13 | 阶段顺序确定 | `emits phase announcements in order` [atomic-update.test.ts](tests/atomic-update.test.ts) | 阶段严格为 downloading→verifying→resolving→staging→indexing→committing | ✅ |
+| U14 | 仓储原子提交/丢弃/孤儿清理 | storage [storage.test.ts](tests/storage.test.ts) | 9 个用例覆盖 seed、stage+commit(带基础版本校验)、discard、rollback、设置持久化、重启清理 | ✅ |
 
-> 中断注入方式：服务 `checkUpdate(url, { onPhase, signal, downloader })` 允许在任意阶段回调中抛出 `UpdateAbortedError` 或让 `downloader` reject；仓储层通过覆盖 `stage` 抛出 `QuotaExceededStorageError` 模拟配额不足。重启通过新建 `ContentService` 并重新 `initialize` 复现，`initialize` 会调用 `cleanupInterruptedStaging`。
+> 中断注入方式：服务 `checkUpdate(url, { onPhase, signal, downloader })` 允许在任意阶段回调中抛出 `UpdateAbortedError`，或让 `downloader` reject，或用 `AbortController.abort()` 中断下载。配额不足通过在仓储 `stage` 抛出 `QuotaExceededStorageError` 模拟。重启通过新建 `ContentService` 并重新 `initialize` 复现；`initialize` 会清理未完成的暂存和任何孤儿包（非 active/previous/staged 的版本记录）。下载与校验通过后才会写入 IndexedDB，因此失败的下载不会留下任何分块。
 
-### 3.4 回滚
+### 3.4 两标签页并发
+
+乐观并发控制：`commit(pack, expectedBaseVersion)` 在单个 `readwrite` 事务内读取当前 `activeVersion`，若不等于 `expectedBaseVersion` 则中止事务并抛 `UpdateConflictError`。IndexedDB 对同一 store 的读写事务串行化，因此只有一个标签页能提交；败者的候选包通过 `discardStagedCandidate` 安全删除（仅当它不是活动版本时），绝不可能被搜索或深链接读取。
+
+| # | 场景 | 复现（测试名 / 文件） | 证据 | 结果 |
+|---|---|---|---|---|
+| C1 | 两标签页同时更新到**同一 v2** | `lets exactly one tab commit; both converge on v2 with no orphan data` [concurrency.test.ts](tests/concurrency.test.ts) | `Promise.allSettled` 两个 `checkUpdate`；只有一个事务提交，败者检测到活动版本已为 v2 并收敛；两标签页 `packageVersion` 均为 `2026.09.01`，无 stagedVersion，v1/v2 包各留存一份用于回滚 | ✅ |
+| C2 | 两标签页更新到**不同版本** | `only one version becomes active; the failed candidate is deleted and unsearchable` [concurrency.test.ts](tests/concurrency.test.ts) | A 提交 v2 后 B 才提交其专属版本 → `UpdateConflictError`；B 的候选包 `2026.10.01` 被删除，B 收敛到 v2；两标签页搜索“替代版本专属文章”均 0 条命中；`getPack('2026.10.01')` 为 null | ✅ |
+| C3 | 并发冲突后重启只可见完整胜者版本 | `shows only the complete winning version after restart with no leftover chunks or temp metadata` [concurrency.test.ts](tests/concurrency.test.ts) | 冲突后关闭连接并重启服务；活动版本为 v2，无 staged、无 `2026.10.01` 包，可见文章集合严格为 `[ART-AID-1, ART-NOTARY-1, ART-SERVICE-3]`，搜索不含败者内容 | ✅ |
+
+> 复现要点：测试用两个 `ContentRepository.open()` 连接到同一个 fake-indexeddb（模拟两个浏览器标签页共享同一 IndexedDB）。不同版本场景通过让 B 的下载器等待 A 提交完成（`deferred` 屏障）来确定性地让 A 先提交，从而稳定触发冲突分支。
+
+### 3.5 回滚
 
 | # | 场景 | 复现（测试名 / 文件） | 证据 | 结果 |
 |---|---|---|---|---|
@@ -83,17 +97,21 @@ npm run dev         # 原生浏览器验收：http://localhost:5173/
 | R3 | 回滚历史版本留存 | `stages and atomically commits a new version` / `keeps the previous version for rollback` [storage.test.ts](tests/storage.test.ts) | 提交后 `previousVersion` 指向旧版，`rollback` 原子地改回指针 | ✅ |
 | R4 | 重载后仍可回滚 | 浏览器原生验收（见 §4） | 重载后服务从 DB 读取 `previousVersion`，回滚按钮仍可见并可用 | ✅ |
 
-### 3.5 跨版本确定性与深链接
+### 3.6 跨版本确定性与深链接
 
 | # | 场景 | 复现（测试名 / 文件） | 证据 | 结果 |
 |---|---|---|---|---|
 | D1 | 深链接直接打开文章 | `loads a topic and article directly from the hash` [app.test.tsx](tests/app.test.tsx) | `#/article/ART-NOTARY-1` 直接渲染标题与法律依据 | ✅ |
 | D2 | 深链接打开搜索 | `loads search results from a deep link` [app.test.tsx](tests/app.test.tsx) | `#/search?q=公证` 渲染结果列表与计数 | ✅ |
 | D3 | 撤下文章深链接自动迁移替代条目 | `redirects a withdrawn article deep link to its replacement after update` [app.test.tsx](tests/app.test.tsx) | 更新后访问 `#/article/ART-AID-2` 被替换为 `#/article/ART-SERVICE-3` 并公告 | ✅ |
-| D4 | 检索排序在重复构建下确定 | `produces deterministic ordering across repeated queries and rebuilds` [search.test.ts](tests/search.test.ts) | 两个独立索引对同一查询返回相同顺序 | ✅ |
-| D5 | 撤下条目不可检索、替代条目可检索 | `reflects withdrawn articles removed and new articles searchable in v2` [search.test.ts](tests/search.test.ts) | v2 搜“行动不便”不返回 ART-AID-2，搜“上门服务”首条为 ART-SERVICE-3 | ✅ |
-| D6 | 阅读设置跨更新保留 | `preserves reading settings across a version update` [atomic-update.test.ts](tests/atomic-update.test.ts) | 设为 large/dark 后更新到 v2，设置不变；UI 测试验证写入 `data-font-size`/`data-theme` 并持久化 | ✅ |
-| D7 | REVISE/WITHDRAW/ADD 物化正确 | resolver [resolver.test.ts](tests/resolver.test.ts) | 7 个用例覆盖三类变更、基线不符、缺失替代条目、缺失主题等 | ✅ |
+| D4 | v1/v2 内同查询排序重复构建确定 | `produces deterministic search rankings for identical queries within each version` [atomic-update.test.ts](tests/atomic-update.test.ts) | v1、v2 各建两个独立索引，对“服务/法律援助/上门/公证”返回完全相同顺序 | ✅ |
+| D5 | 撤下条目离开排名、替代条目进入排名 | `removes the withdrawn article from rankings and surfaces the replacement` [atomic-update.test.ts](tests/atomic-update.test.ts) | v1 搜“行动不便”含 ART-AID-2；v2 不含 ART-AID-2 且含 ART-SERVICE-3；`withdrawals` 映射正确 | ✅ |
+| D6 | 离线重启后可见集合完整且确定 | `exposes a complete and deterministic visible set after an offline restart` [atomic-update.test.ts](tests/atomic-update.test.ts) | v2 重启后可见文章严格为 `[ART-AID-1, ART-NOTARY-1, ART-SERVICE-3]`，无 staged、无孤儿，检索一致 | ✅ |
+| D7 | 回滚后可见集合完整回到 v1 | `rolls back to a complete v1 visible set after v2 was active` [atomic-update.test.ts](tests/atomic-update.test.ts) | 回滚后文章集合与种子完全一致，搜“行动不便”命中 ART-AID-2 且不含 ART-SERVICE-3 | ✅ |
+| D8 | 检索排序在重复构建下确定 | `produces deterministic ordering across repeated queries and rebuilds` [search.test.ts](tests/search.test.ts) | 两个独立索引对同一查询返回相同顺序 | ✅ |
+| D9 | 撤下条目不可检索、替代条目可检索 | `reflects withdrawn articles removed and new articles searchable in v2` [search.test.ts](tests/search.test.ts) | v2 搜“行动不便”不返回 ART-AID-2，搜“上门服务”首条为 ART-SERVICE-3 | ✅ |
+| D10 | 阅读设置跨更新保留 | `preserves reading settings across a version update` [atomic-update.test.ts](tests/atomic-update.test.ts) | 设为 large/dark 后更新到 v2，设置不变；UI 测试验证写入 `data-font-size`/`data-theme` 并持久化 | ✅ |
+| D11 | REVISE/WITHDRAW/ADD 物化正确 | resolver [resolver.test.ts](tests/resolver.test.ts) | 7 个用例覆盖三类变更、基线不符、缺失替代条目、缺失主题等 | ✅ |
 
 ## 4. 原生浏览器验收
 
@@ -112,4 +130,10 @@ IndexedDB 结构（数据库名 `rights-pocket-guide`，版本 3）：
 - `meta`（keyPath `key`）：`activeVersion`、`previousVersion`、`stagedVersion`；
 - `settings`（keyPath `key`）：阅读设置。
 
-更新流程中，新包先写入 `packs` 并登记 `stagedVersion`；提交仅在一个事务内改三个 meta 键。任何失败/崩溃都不会移动 `activeVersion`，重启时 `initialize` 会清理残留 `stagedVersion` 及其包，因此用户只能看到**完整旧包**或**完整新包**。
+更新流程中，新包先写入 `packs` 并登记 `stagedVersion`；提交在**单个 `readwrite` 事务**内读取 `activeVersion` 并与预期基础版本比较（乐观并发），仅当一致时才改 `activeVersion`/`previousVersion` 并删除 `stagedVersion`。因此：
+
+- 任一阶段失败/中断都不会移动 `activeVersion`，候选包由 `discardStagedCandidate` 删除（仅当它不是活动版本时），或在重启时由 `cleanupOrphanPacks` 清理；
+- 两个标签页同时提交时，IndexedDB 串行化事务，只有一个能通过基础版本校验，另一个收到 `UpdateConflictError` 并丢弃自己的候选（或在同版本时收敛到已提交版本）；
+- 下载与哈希校验通过后才写入 IndexedDB，失败下载不留下分块；检索索引只在内存中对活动包构建，暂存/失败版本的索引永远不会被视图或深链接读取。
+
+所以用户在任何时刻、任何中断或并发之后，只能看到**完整旧包**或**完整新包**，排序、撤下替代关系与可见集合均确定。

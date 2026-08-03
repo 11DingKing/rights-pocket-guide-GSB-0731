@@ -6,6 +6,7 @@ import {
   STORE_PACKS,
   STORE_SETTINGS,
   StorageError,
+  UpdateConflictError,
   openDatabase,
   requestToPromise,
   transactionToPromise,
@@ -37,6 +38,7 @@ export class ContentRepository {
 
   async initialize(seed: MaterializedPack): Promise<void> {
     await this.cleanupInterruptedStaging();
+    await this.cleanupOrphanPacks();
     const active = await this.getActiveVersion();
     if (active === null) {
       await this.seedFirstVersion(seed);
@@ -54,6 +56,37 @@ export class ContentRepository {
     transaction.objectStore(STORE_PACKS).delete(stagedVersion);
     transaction.objectStore(STORE_META).delete(META_STAGED);
     await transactionToPromise(transaction);
+  }
+
+  private async cleanupOrphanPacks(): Promise<void> {
+    const [active, previous, staged] = await Promise.all([
+      this.getActiveVersion(),
+      this.getPreviousVersion(),
+      this.getStagedVersion(),
+    ]);
+    const keep = new Set<string>();
+    for (const version of [active, previous, staged]) {
+      if (version !== null) keep.add(version);
+    }
+    const transaction = txn(this.db, [STORE_PACKS], 'readonly');
+    const allVersions = await requestToPromise(
+      transaction.objectStore(STORE_PACKS).getAllKeys() as IDBRequest<
+        IDBValidKey[]
+      >,
+    );
+    await transactionToPromise(transaction);
+
+    const orphans = allVersions
+      .map((key) => (typeof key === 'string' ? key : null))
+      .filter((key): key is string => key !== null && !keep.has(key));
+
+    if (orphans.length === 0) return;
+
+    const deleteTransaction = txn(this.db, [STORE_PACKS], 'readwrite');
+    for (const version of orphans) {
+      deleteTransaction.objectStore(STORE_PACKS).delete(version);
+    }
+    await transactionToPromise(deleteTransaction);
   }
 
   private async seedFirstVersion(seed: MaterializedPack): Promise<void> {
@@ -136,11 +169,10 @@ export class ContentRepository {
     }
   }
 
-  async commit(pack: MaterializedPack): Promise<void> {
-    const currentVersion = await this.getActiveVersion();
-    if (currentVersion === null) {
-      throw new StorageError('提交失败：当前没有可用的活动版本');
-    }
+  async commit(
+    pack: MaterializedPack,
+    expectedBaseVersion: string,
+  ): Promise<void> {
     const stagedVersion = await this.getStagedVersion();
     if (stagedVersion !== pack.packageVersion) {
       throw new StorageError(
@@ -148,25 +180,87 @@ export class ContentRepository {
       );
     }
 
-    const transaction = txn(this.db, [STORE_META], 'readwrite');
-    const metaStore = transaction.objectStore(STORE_META);
-    const activeMeta: MetaEntry = {
-      key: META_ACTIVE,
-      value: pack.packageVersion,
-    };
-    metaStore.put(activeMeta);
-    const previousMeta: MetaEntry = {
-      key: META_PREVIOUS,
-      value: currentVersion,
-    };
-    metaStore.put(previousMeta);
-    metaStore.delete(META_STAGED);
-    await transactionToPromise(transaction);
+    await new Promise<void>((resolve, reject) => {
+      const transaction = txn(this.db, [STORE_META], 'readwrite');
+      const metaStore = transaction.objectStore(STORE_META);
+      let conflict: UpdateConflictError | null = null;
+      let missingStaged = false;
+
+      const activeRequest = metaStore.get(META_ACTIVE) as IDBRequest<
+        MetaEntry | undefined
+      >;
+      activeRequest.onsuccess = () => {
+        const current = activeRequest.result?.value ?? null;
+        if (current !== expectedBaseVersion) {
+          conflict = new UpdateConflictError(
+            current ?? '(无)',
+            expectedBaseVersion,
+          );
+          transaction.abort();
+          return;
+        }
+        const stagedRequest = metaStore.get(META_STAGED) as IDBRequest<
+          MetaEntry | undefined
+        >;
+        stagedRequest.onsuccess = () => {
+          if (stagedRequest.result?.value !== pack.packageVersion) {
+            missingStaged = true;
+            transaction.abort();
+            return;
+          }
+          const activeMeta: MetaEntry = {
+            key: META_ACTIVE,
+            value: pack.packageVersion,
+          };
+          metaStore.put(activeMeta);
+          const previousMeta: MetaEntry = {
+            key: META_PREVIOUS,
+            value: expectedBaseVersion,
+          };
+          metaStore.put(previousMeta);
+          metaStore.delete(META_STAGED);
+        };
+        stagedRequest.onerror = () => {
+          transaction.abort();
+        };
+      };
+      activeRequest.onerror = () => transaction.abort();
+
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => {
+        reject(
+          conflict ??
+            new StorageError('事务失败', transaction.error),
+        );
+      };
+      transaction.onabort = () => {
+        if (conflict !== null) {
+          reject(conflict);
+          return;
+        }
+        if (missingStaged) {
+          reject(
+            new StorageError(
+              `提交失败：版本 ${pack.packageVersion} 的暂存已被其他进程移除`,
+            ),
+          );
+          return;
+        }
+        reject(
+          new StorageError(
+            '事务已中止',
+            transaction.error,
+          ),
+        );
+      };
+    });
   }
 
   async discardStaging(): Promise<void> {
     const stagedVersion = await this.getStagedVersion();
     if (stagedVersion === null) return;
+    const activeVersion = await this.getActiveVersion();
+    if (activeVersion === stagedVersion) return;
     const transaction = txn(
       this.db,
       [STORE_PACKS, STORE_META],
@@ -174,6 +268,25 @@ export class ContentRepository {
     );
     transaction.objectStore(STORE_PACKS).delete(stagedVersion);
     transaction.objectStore(STORE_META).delete(META_STAGED);
+    await transactionToPromise(transaction);
+  }
+
+  async discardStagedCandidate(version: string): Promise<void> {
+    const [activeVersion, stagedVersion] = await Promise.all([
+      this.getActiveVersion(),
+      this.getStagedVersion(),
+    ]);
+    if (activeVersion === version) return;
+
+    const transaction = txn(
+      this.db,
+      [STORE_PACKS, STORE_META],
+      'readwrite',
+    );
+    transaction.objectStore(STORE_PACKS).delete(version);
+    if (stagedVersion === version) {
+      transaction.objectStore(STORE_META).delete(META_STAGED);
+    }
     await transactionToPromise(transaction);
   }
 

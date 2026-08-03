@@ -61,6 +61,38 @@ export async function createService(
   return { service, repository };
 }
 
+export async function openSecondTab(
+  seed: MaterializedPack = seedPack(),
+): Promise<{ service: ContentService; repository: ContentRepository }> {
+  const repository = await ContentRepository.open();
+  const service = new ContentService(repository);
+  await service.initialize(seed);
+  return { service, repository };
+}
+
+export function buildAlternativePack(
+  base: MaterializedPack,
+  version: string,
+): { bytes: Uint8Array; checksum: Promise<string>; pack: MaterializedPack } {
+  const delta = {
+    packageVersion: version,
+    succeeds: base.packageVersion,
+    changes: [
+      {
+        kind: 'ADD' as const,
+        topicId: 'TOPIC-NOTARY',
+        articleId: `ART-ALT-${version}`,
+        title: `替代版本专属文章 ${version}`,
+        body: `这是仅存在于版本 ${version} 的内容，用于并发冲突测试。`,
+        legalRef: '并发测试规范',
+      },
+    ],
+  };
+  const bytes = new TextEncoder().encode(JSON.stringify(delta));
+  const pack = applyDelta(base, delta);
+  return { bytes, checksum: sha256Hex(bytes), pack };
+}
+
 export function bytesDownloader(bytes: Uint8Array): Downloader {
   return () => Promise.resolve(bytes);
 }

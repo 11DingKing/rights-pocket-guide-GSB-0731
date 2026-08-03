@@ -43,7 +43,7 @@ describe('ContentRepository', () => {
     await repo.stage(next);
     expect(await repo.getActiveVersion()).toBe('2026.07.31');
     expect(await repo.getStagedVersion()).toBe('2026.09.01');
-    await repo.commit(next);
+    await repo.commit(next, '2026.07.31');
     expect(await repo.getActiveVersion()).toBe('2026.09.01');
     expect(await repo.getStagedVersion()).toBeNull();
     const active = await repo.getActivePack();
@@ -56,7 +56,7 @@ describe('ContentRepository', () => {
     await repo.initialize(seedPack());
     const next = v2Pack();
     await repo.stage(next);
-    await repo.commit(next);
+    await repo.commit(next, '2026.07.31');
     expect(await repo.getPreviousVersion()).toBe('2026.07.31');
     const rolledBack = await repo.rollback();
     expect(rolledBack).toBe('2026.07.31');
@@ -65,7 +65,7 @@ describe('ContentRepository', () => {
 
   it('refuses to commit a version that was not staged', async () => {
     await repo.initialize(seedPack());
-    await expect(repo.commit(v2Pack())).rejects.toBeInstanceOf(StorageError);
+    await expect(repo.commit(v2Pack(), '2026.07.31')).rejects.toBeInstanceOf(StorageError);
   });
 
   it('discards a staged version so the old version remains intact', async () => {
