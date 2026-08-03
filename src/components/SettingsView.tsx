@@ -18,6 +18,15 @@ const THEMES: ReadonlyArray<{ value: ReadingSettings['theme']; label: string }> 
   { value: 'high-contrast', label: '高对比' },
 ];
 
+const LINE_SPACINGS: ReadonlyArray<{
+  value: ReadingSettings['lineSpacing'];
+  label: string;
+}> = [
+  { value: 'compact', label: '紧凑' },
+  { value: 'normal', label: '适中' },
+  { value: 'spacious', label: '宽松' },
+];
+
 export function SettingsView({ settings, onChange }: SettingsViewProps) {
   return (
     <section className="settings-view" aria-labelledby="settings-heading">
@@ -54,6 +63,26 @@ export function SettingsView({ settings, onChange }: SettingsViewProps) {
                 value={option.value}
                 checked={settings.theme === option.value}
                 onChange={() => onChange({ ...settings, theme: option.value })}
+              />
+              <span>{option.label}</span>
+            </label>
+          ))}
+        </div>
+      </fieldset>
+
+      <fieldset className="settings-group">
+        <legend>行距</legend>
+        <div role="radiogroup" aria-label="行距" className="radio-row">
+          {LINE_SPACINGS.map((option) => (
+            <label key={option.value} className="radio-option">
+              <input
+                type="radio"
+                name="lineSpacing"
+                value={option.value}
+                checked={settings.lineSpacing === option.value}
+                onChange={() =>
+                  onChange({ ...settings, lineSpacing: option.value })
+                }
               />
               <span>{option.label}</span>
             </label>

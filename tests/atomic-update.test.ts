@@ -240,7 +240,7 @@ describe('atomic update', () => {
 
   it('preserves reading settings across a version update', async () => {
     const service = await freshService();
-    await service.updateSettings({ fontSize: 'large', theme: 'dark' });
+    await service.updateSettings({ fontSize: 'large', theme: 'dark', lineSpacing: 'spacious' });
     await service.checkUpdate('/content-pack-v2.json', {
       expectedChecksum: await expectedV2Checksum(),
       downloader: bytesDownloader(loadV2Bytes()),
@@ -248,6 +248,7 @@ describe('atomic update', () => {
     expect(service.getState().settings).toEqual({
       fontSize: 'large',
       theme: 'dark',
+      lineSpacing: 'spacious',
     });
   });
 

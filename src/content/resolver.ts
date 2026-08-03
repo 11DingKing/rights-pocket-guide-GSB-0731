@@ -164,10 +164,39 @@ export function applyDelta(
 
   for (const [withdrawnId, withdrawal] of Object.entries(withdrawals)) {
     const replacementId = withdrawal.replacementArticleId;
-    if (replacementId !== null && articles[replacementId] === undefined) {
+    if (
+      replacementId !== null &&
+      articles[replacementId] === undefined &&
+      withdrawals[replacementId] === undefined
+    ) {
       throw new PackValidationError(
         `撤下文章 ${withdrawnId} 的替代文章 ${replacementId} 在包中不存在`,
       );
+    }
+  }
+
+  for (const startId of Object.keys(withdrawals)) {
+    const visited = new Set<string>();
+    let current: string | null = startId;
+    while (current !== null) {
+      if (visited.has(current)) {
+        throw new PackValidationError(
+          `撤下替代关系存在环：${Array.from(visited).concat(current).join(' → ')}`,
+        );
+      }
+      visited.add(current);
+      const next: string | null =
+        withdrawals[current]?.replacementArticleId ?? null;
+      if (
+        next !== null &&
+        articles[next] === undefined &&
+        withdrawals[next] === undefined
+      ) {
+        throw new PackValidationError(
+          `撤下文章 ${current} 的替代文章 ${next} 在包中不存在`,
+        );
+      }
+      current = next;
     }
   }
 

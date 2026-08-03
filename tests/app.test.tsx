@@ -241,7 +241,15 @@ describe('deep links and withdrawal migration', () => {
     ).toBeInTheDocument();
     const liveRegion = screen.getByTestId('notice-region');
     await waitFor(() => {
+      expect(liveRegion.textContent).toContain('内容已更新');
       expect(liveRegion.textContent).toContain('已为您跳转到替代文章');
+      expect(liveRegion.textContent).toContain('行动不便时的上门服务');
+    });
+
+    await waitFor(() => {
+      expect(document.activeElement).toBe(
+        screen.getByRole('heading', { name: '行动不便时的上门服务' }),
+      );
     });
   });
 });
@@ -256,14 +264,16 @@ describe('reading settings', () => {
 
     await user.click(screen.getByRole('radio', { name: '较大' }));
     await user.click(screen.getByRole('radio', { name: '深色' }));
+    await user.click(screen.getByRole('radio', { name: '宽松' }));
 
     await waitFor(() => {
       expect(document.documentElement.getAttribute('data-font-size')).toBe('large');
       expect(document.documentElement.getAttribute('data-theme')).toBe('dark');
+      expect(document.documentElement.getAttribute('data-line-spacing')).toBe('spacious');
     });
 
     const saved = await repository.loadSettings();
-    expect(saved).toEqual({ fontSize: 'large', theme: 'dark' });
+    expect(saved).toEqual({ fontSize: 'large', theme: 'dark', lineSpacing: 'spacious' });
   });
 });
 

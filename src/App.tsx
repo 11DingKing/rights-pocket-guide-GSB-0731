@@ -15,6 +15,7 @@ import { SkipLink } from './components/SkipLink';
 import { LiveRegion } from './components/LiveRegion';
 import { ContentService } from './services/contentService';
 import type { ReadingSettings } from './types';
+import { resolveArticleId } from './content/deepLink';
 
 interface Manifest {
   readonly url: string;
@@ -70,22 +71,36 @@ export function App() {
     const root = document.documentElement;
     root.setAttribute('data-font-size', state.settings.fontSize);
     root.setAttribute('data-theme', state.settings.theme);
+    root.setAttribute('data-line-spacing', state.settings.lineSpacing);
   }, [state.settings]);
 
-  const withdrawalEffect = useCallback(() => {
-    if (route.name !== 'article' || state.pack === null) return;
-    const withdrawal = state.pack.withdrawals[route.articleId];
-    if (withdrawal === undefined) return;
-    if (withdrawal.replacementArticleId !== null) {
-      const replacement = state.pack.articles[withdrawal.replacementArticleId];
-      const title = replacement?.title ?? withdrawal.replacementArticleId;
-      redirectingRef.current = true;
-      setNotice(`该文章已撤下，已为您跳转到替代文章：${title}`);
-      replaceHash({ name: 'article', articleId: withdrawal.replacementArticleId });
-    } else {
-      setNotice('该文章已撤下，且没有替代文章。');
-    }
+  const deepLinkResolution = useMemo(() => {
+    if (route.name !== 'article' || state.pack === null) return null;
+    return resolveArticleId(state.pack, route.articleId);
   }, [route, state.pack]);
+
+  const withdrawalEffect = useCallback(() => {
+    if (deepLinkResolution === null) return;
+    if (
+      deepLinkResolution.kind === 'available' &&
+      deepLinkResolution.redirectedFrom !== null
+    ) {
+      const target = state.pack?.articles[deepLinkResolution.articleId];
+      const title = target?.title ?? deepLinkResolution.articleId;
+      redirectingRef.current = true;
+      setNotice(`内容已更新，已为您跳转到替代文章：${title}`);
+      replaceHash({
+        name: 'article',
+        articleId: deepLinkResolution.articleId,
+      });
+    } else if (deepLinkResolution.kind === 'withdrawn') {
+      setNotice('该文章已撤下，且没有替代文章。');
+    } else if (deepLinkResolution.kind === 'cycle') {
+      setNotice('该文章的替代关系存在异常，暂时无法显示，请从主题列表选择其他内容。');
+    } else if (deepLinkResolution.kind === 'missing') {
+      setNotice('未找到该文章，可能已被移除。');
+    }
+  }, [deepLinkResolution, state.pack]);
 
   useEffect(() => {
     withdrawalEffect();
@@ -93,7 +108,14 @@ export function App() {
 
   useEffect(() => {
     if (state.pack === null) return;
-    if (route.name === 'article' && state.pack.withdrawals[route.articleId]) {
+    if (deepLinkResolution !== null && deepLinkResolution.kind !== 'available') {
+      return;
+    }
+    if (
+      deepLinkResolution !== null &&
+      deepLinkResolution.kind === 'available' &&
+      deepLinkResolution.redirectedFrom !== null
+    ) {
       return;
     }
     if (redirectingRef.current) {
@@ -103,7 +125,7 @@ export function App() {
     }
     setNotice('');
     setAnnouncement(routeAnnouncement(route, state.pack));
-  }, [route, state.pack]);
+  }, [route, state.pack, deepLinkResolution]);
 
   const searchHits = useMemo(() => {
     if (route.name !== 'search' || state.index === null) return [];
@@ -170,16 +192,36 @@ export function App() {
         <p>主题不存在。</p>
       );
   } else if (route.name === 'article') {
-    if (pack.withdrawals[route.articleId] !== undefined) {
-      content = <p>正在跳转到替代文章…</p>;
-    } else {
-      const article = pack.articles[route.articleId];
+    if (deepLinkResolution === null) {
+      content = <p>文章不存在。</p>;
+    } else if (deepLinkResolution.kind === 'available') {
+      const article = pack.articles[deepLinkResolution.articleId];
       content =
         article !== undefined ? (
           <ArticleView article={article} />
         ) : (
           <p>文章不存在。</p>
         );
+    } else if (deepLinkResolution.kind === 'withdrawn') {
+      content = (
+        <div role="alert">
+          <p>该文章已撤下，且没有替代文章。</p>
+        </div>
+      );
+    } else if (deepLinkResolution.kind === 'cycle') {
+      content = (
+        <div role="alert">
+          <p>
+            该文章的替代关系存在异常，暂时无法显示，请从主题列表选择其他内容。
+          </p>
+        </div>
+      );
+    } else {
+      content = (
+        <div role="alert">
+          <p>未找到该文章，可能已被移除。</p>
+        </div>
+      );
     }
   } else if (route.name === 'search') {
     content = (
@@ -213,6 +255,11 @@ export function App() {
       <div className="app-body">
         <TopicList pack={pack} currentRoute={route} />
         <main id="main-content" ref={mainRef} className="main-content" tabIndex={-1}>
+          {state.degradedNotice !== null && (
+            <div className="degraded-banner" role="alert">
+              {state.degradedNotice}
+            </div>
+          )}
           {content}
           {canRollback && (
             <button

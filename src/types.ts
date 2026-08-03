@@ -67,15 +67,30 @@ export interface DeltaPack {
 
 export type RawPack = FullPack | DeltaPack;
 
+export type FontSize = 'small' | 'medium' | 'large' | 'xlarge';
+export type Theme = 'light' | 'dark' | 'high-contrast';
+export type LineSpacing = 'compact' | 'normal' | 'spacious';
+
 export interface ReadingSettings {
-  readonly fontSize: 'small' | 'medium' | 'large' | 'xlarge';
-  readonly theme: 'light' | 'dark' | 'high-contrast';
+  readonly fontSize: FontSize;
+  readonly theme: Theme;
+  readonly lineSpacing: LineSpacing;
 }
+
+export const SETTINGS_SCHEMA_VERSION_V1 = 1;
+export const SETTINGS_SCHEMA_VERSION_V2 = 2;
+export const CURRENT_SETTINGS_SCHEMA = SETTINGS_SCHEMA_VERSION_V2;
 
 export const DEFAULT_SETTINGS: ReadingSettings = {
   fontSize: 'medium',
   theme: 'light',
+  lineSpacing: 'normal',
 };
+
+export interface PersistedSettings {
+  readonly schemaVersion: number;
+  readonly settings: ReadingSettings;
+}
 
 export type UpdatePhase =
   | 'idle'

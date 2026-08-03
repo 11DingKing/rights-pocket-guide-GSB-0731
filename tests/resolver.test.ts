@@ -82,4 +82,44 @@ describe('resolver', () => {
     };
     expect(() => applyDelta(base(), delta)).toThrow(/不存在的主题/);
   });
+
+  it('rejects a replacement chain that forms a cycle', () => {
+    const cycleDelta: DeltaPack = {
+      packageVersion: '2026.09.01',
+      succeeds: '2026.07.31',
+      changes: [
+        {
+          kind: 'WITHDRAW',
+          articleId: 'ART-AID-1',
+          replacementArticleId: 'ART-AID-2',
+        },
+        {
+          kind: 'WITHDRAW',
+          articleId: 'ART-AID-2',
+          replacementArticleId: 'ART-NOTARY-1',
+        },
+        {
+          kind: 'WITHDRAW',
+          articleId: 'ART-NOTARY-1',
+          replacementArticleId: 'ART-AID-1',
+        },
+      ],
+    };
+    expect(() => applyDelta(base(), cycleDelta)).toThrow(/替代关系存在环/);
+  });
+
+  it('rejects a self-referencing withdrawal cycle', () => {
+    const selfCycleDelta: DeltaPack = {
+      packageVersion: '2026.09.01',
+      succeeds: '2026.07.31',
+      changes: [
+        {
+          kind: 'WITHDRAW',
+          articleId: 'ART-AID-1',
+          replacementArticleId: 'ART-AID-1',
+        },
+      ],
+    };
+    expect(() => applyDelta(base(), selfCycleDelta)).toThrow(/替代关系存在环/);
+  });
 });

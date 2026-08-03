@@ -1,5 +1,14 @@
-import type { MaterializedPack, ReadingSettings } from '../types';
-import { DEFAULT_SETTINGS } from '../types';
+import type {
+  MaterializedPack,
+  PersistedSettings,
+  ReadingSettings,
+} from '../types';
+import { CURRENT_SETTINGS_SCHEMA, DEFAULT_SETTINGS } from '../types';
+import {
+  migrateSettings,
+  validateSettingsForVersion,
+  expectedSchemaForPackageVersion,
+} from '../settings/migration';
 import {
   QuotaExceededStorageError,
   STORE_META,
@@ -25,7 +34,7 @@ interface MetaEntry {
 
 interface SettingsEntry {
   readonly key: string;
-  readonly value: ReadingSettings;
+  readonly value: PersistedSettings;
 }
 
 export class ContentRepository {
@@ -172,6 +181,7 @@ export class ContentRepository {
   async commit(
     pack: MaterializedPack,
     expectedBaseVersion: string,
+    migratedSettings?: PersistedSettings,
   ): Promise<void> {
     const stagedVersion = await this.getStagedVersion();
     if (stagedVersion !== pack.packageVersion) {
@@ -181,7 +191,11 @@ export class ContentRepository {
     }
 
     await new Promise<void>((resolve, reject) => {
-      const transaction = txn(this.db, [STORE_META], 'readwrite');
+      const stores =
+        migratedSettings !== undefined
+          ? [STORE_META, STORE_SETTINGS]
+          : [STORE_META];
+      const transaction = txn(this.db, stores, 'readwrite');
       const metaStore = transaction.objectStore(STORE_META);
       let conflict: UpdateConflictError | null = null;
       let missingStaged = false;
@@ -219,6 +233,15 @@ export class ContentRepository {
           };
           metaStore.put(previousMeta);
           metaStore.delete(META_STAGED);
+
+          if (migratedSettings !== undefined) {
+            const settingsStore = transaction.objectStore(STORE_SETTINGS);
+            const settingsEntry: SettingsEntry = {
+              key: SETTINGS_KEY,
+              value: migratedSettings,
+            };
+            settingsStore.put(settingsEntry);
+          }
         };
         stagedRequest.onerror = () => {
           transaction.abort();
@@ -318,7 +341,7 @@ export class ContentRepository {
     return previousVersion;
   }
 
-  async loadSettings(): Promise<ReadingSettings> {
+  async loadPersistedSettings(): Promise<PersistedSettings | null> {
     const transaction = txn(this.db, [STORE_SETTINGS], 'readonly');
     const result = await requestToPromise(
       transaction.objectStore(STORE_SETTINGS).get(SETTINGS_KEY) as IDBRequest<
@@ -326,12 +349,40 @@ export class ContentRepository {
       >,
     );
     await transactionToPromise(transaction);
-    return result?.value ?? DEFAULT_SETTINGS;
+    if (result === undefined) return null;
+    const migrated = migrateSettings(result.value);
+    return migrated;
   }
 
-  async saveSettings(settings: ReadingSettings): Promise<void> {
+  async loadSettings(
+    fallback: ReadingSettings = DEFAULT_SETTINGS,
+  ): Promise<ReadingSettings> {
+    const activeVersion = await this.getActiveVersion();
+    const expectedSchema =
+      activeVersion !== null
+        ? expectedSchemaForPackageVersion(activeVersion)
+        : 2;
+    const persisted = await this.loadPersistedSettings();
+    return validateSettingsForVersion(persisted, expectedSchema, fallback);
+  }
+
+  async saveSettings(
+    settings: ReadingSettings,
+    schemaVersion?: number,
+  ): Promise<void> {
+    let version = schemaVersion;
+    if (version === undefined) {
+      const activeVersion = await this.getActiveVersion();
+      version =
+        activeVersion !== null
+          ? expectedSchemaForPackageVersion(activeVersion)
+          : CURRENT_SETTINGS_SCHEMA;
+    }
+    const entry: SettingsEntry = {
+      key: SETTINGS_KEY,
+      value: { schemaVersion: version, settings },
+    };
     const transaction = txn(this.db, [STORE_SETTINGS], 'readwrite');
-    const entry: SettingsEntry = { key: SETTINGS_KEY, value: settings };
     transaction.objectStore(STORE_SETTINGS).put(entry);
     await transactionToPromise(transaction);
   }

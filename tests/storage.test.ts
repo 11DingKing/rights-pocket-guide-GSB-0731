@@ -79,7 +79,7 @@ describe('ContentRepository', () => {
 
   it('persists reading settings across repository instances', async () => {
     await repo.initialize(seedPack());
-    const settings: ReadingSettings = { fontSize: 'large', theme: 'dark' };
+    const settings: ReadingSettings = { fontSize: 'large', theme: 'dark', lineSpacing: 'spacious' };
     await repo.saveSettings(settings);
     repo.close();
 

@@ -1,10 +1,11 @@
 import type {
   Downloader,
   MaterializedPack,
+  PersistedSettings,
   ReadingSettings,
   UpdateStatus,
 } from "../types";
-import { DEFAULT_SETTINGS } from "../types";
+import { CURRENT_SETTINGS_SCHEMA, DEFAULT_SETTINGS } from "../types";
 import { applyDelta, materializeFullPack } from "../content/resolver";
 import {
   parseRawPack,
@@ -42,6 +43,7 @@ export interface ServiceState {
   readonly ready: boolean;
   readonly previousVersion: string | null;
   readonly canRollback: boolean;
+  readonly degradedNotice: string | null;
 }
 
 export type ServiceListener = (state: ServiceState) => void;
@@ -72,6 +74,7 @@ export class ContentService {
   private updateStatus: UpdateStatus = IDLE_STATUS;
   private ready = false;
   private previousVersion: string | null = null;
+  private degradedNotice: string | null = null;
   private cachedState: ServiceState = {
     pack: null,
     index: null,
@@ -80,6 +83,7 @@ export class ContentService {
     ready: false,
     previousVersion: null,
     canRollback: false,
+    degradedNotice: null,
   };
   private readonly listeners = new Set<ServiceListener>();
 
@@ -119,6 +123,7 @@ export class ContentService {
       ready: this.ready,
       previousVersion: this.previousVersion,
       canRollback: this.previousVersion !== null,
+      degradedNotice: this.degradedNotice,
     };
   }
 
@@ -131,6 +136,11 @@ export class ContentService {
 
   private setStatus(status: UpdateStatus): void {
     this.updateStatus = status;
+    this.emit();
+  }
+
+  setDegradedNotice(message: string | null): void {
+    this.degradedNotice = message;
     this.emit();
   }
 
@@ -218,7 +228,15 @@ export class ContentService {
         newVersion: resolved.packageVersion,
       });
       onPhase?.("committing");
-      await this.repository.commit(resolved, expectedBaseVersion);
+      const migratedSettings: PersistedSettings = {
+        schemaVersion: CURRENT_SETTINGS_SCHEMA,
+        settings: this.settings,
+      };
+      await this.repository.commit(
+        resolved,
+        expectedBaseVersion,
+        migratedSettings,
+      );
       this.throwIfAborted(signal, "提交后已中断");
 
       const oldVersion = this.pack?.packageVersion ?? null;
@@ -334,9 +352,24 @@ export class ContentService {
   }
 
   async updateSettings(settings: ReadingSettings): Promise<void> {
-    await this.repository.saveSettings(settings);
+    const previous = this.settings;
     this.settings = settings;
     this.emit();
+    try {
+      await this.repository.saveSettings(settings);
+      this.degradedNotice = null;
+      this.emit();
+    } catch (error) {
+      if (error instanceof QuotaExceededStorageError) {
+        this.degradedNotice =
+          "存储空间不足，新设置仅在本次会话生效，已保留上一次保存的阅读设置。";
+        this.emit();
+        return;
+      }
+      this.settings = previous;
+      this.emit();
+      throw error;
+    }
   }
 
   resetUpdateStatus(): void {

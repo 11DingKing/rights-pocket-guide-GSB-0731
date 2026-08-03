@@ -7,7 +7,7 @@
 ```bash
 npm install
 npm run typecheck   # tsc -b --noEmit，strict + noUncheckedIndexedAccess
-npm test            # vitest run，8 个测试文件 / 68 个用例（含两标签页并发）
+npm test            # vitest run，11 个测试文件 / 101 个用例（含两标签页并发、设置迁移、成环检测、配额降级）
 npm run build       # tsc -b && vite build
 npm run dev         # 原生浏览器验收：http://localhost:5173/
 ```
@@ -26,11 +26,11 @@ npm run dev         # 原生浏览器验收：http://localhost:5173/
 | 编排 | [services/contentService.ts](src/services/contentService.ts) | 下载→校验→归并→暂存→建索引→原子切换；阶段公告 | 仅通过此层 |
 | 视图 | [App.tsx](src/App.tsx)、[components/](src/components) | React 视图、路由、a11y、焦点 | 不直接读写 IndexedDB |
 
-原子切换的关键：`commit` 在**单个 `readwrite` 事务**内写入 `activeVersion`、`previousVersion` 并删除 `stagedVersion`；视图持有的 `pack/index` 只在 `await commit()` 成功后才替换。暂存失败、校验失败、下载失败或任何阶段中断都不会改动 `activeVersion`。
+原子切换的关键：`commit` 在**单个 `readwrite` 事务**内写入 `activeVersion`、`previousVersion` 并删除 `stagedVersion`；v2 提交时还在**同一事务**内写入迁移后的 `PersistedSettings`（schemaVersion 2）。视图持有的 `pack/index` 只在 `await commit()` 成功后才替换。暂存失败、校验失败、下载失败或任何阶段中断都不会改动 `activeVersion`，也不会留下跨版本混搭的设置。若事务在提交过程中被强制中止（模拟强制重启），IndexedDB 原子回滚整个事务，保证恢复后只能是「完整旧包 + 旧设置」或「完整新包 + 新设置」。
 
 ## 3. 自动化测试证据
 
-> 所有用例均可通过 `npx vitest run <文件>` 单独复现。结果列来自最近一次 `npm test`：`Tests 57 passed (57)`。
+> 所有用例均可通过 `npx vitest run <文件>` 单独复现。结果列来自最近一次 `npm test`：`Tests 101 passed (101)`。
 
 ### 3.1 键盘路径
 
@@ -50,7 +50,7 @@ npm run dev         # 原生浏览器验收：http://localhost:5173/
 | A1 | 路由变更公告标题 | `announces route changes through the polite live region` [app.test.tsx](tests/app.test.tsx) | `role=status` 区域（`data-testid=live-region`）出现主题/文章标题 | ✅ |
 | A2 | 更新进度与成功公告 | `announces update progress and success via a status region` [app.test.tsx](tests/app.test.tsx) | 顶部状态栏 `data-testid=update-status` 出现“已更新到版本 2026.09.01” | ✅ |
 | A3 | 离线/失败公告且保留旧内容 | `announces failure and keeps old content when offline` [app.test.tsx](tests/app.test.tsx) | 状态栏出现“更新失败”，旧文章仍在文档中 | ✅ |
-| A4 | 撤下文章跳转替代条目公告 | `redirects a withdrawn article deep link to its replacement after update` [app.test.tsx](tests/app.test.tsx) | `data-testid=notice-region` 出现“已为您跳转到替代文章：行动不便时的上门服务” | ✅ |
+| A4 | 撤下文章跳转替代条目公告 | `redirects a withdrawn article deep link to its replacement after update` [app.test.tsx](tests/app.test.tsx) | `data-testid=notice-region` 出现"内容已更新，已为您跳转到替代文章：行动不便时的上门服务"；跳转后焦点移至替代文章 `<h1>` | ✅ |
 | A5 | 状态不只靠颜色 | `communicates update status with text, not color alone` [app.test.tsx](tests/app.test.tsx) | 同时断言 `data-tone=status-success` 与文本内容；圆点 `aria-hidden` | ✅ |
 
 实时区域实现见 [LiveRegion.tsx](src/components/LiveRegion.tsx)：`aria-live` + `aria-atomic`，通过 rAF 清空再赋值以保证重复文本也能被二次播报。
@@ -110,8 +110,49 @@ npm run dev         # 原生浏览器验收：http://localhost:5173/
 | D7 | 回滚后可见集合完整回到 v1 | `rolls back to a complete v1 visible set after v2 was active` [atomic-update.test.ts](tests/atomic-update.test.ts) | 回滚后文章集合与种子完全一致，搜“行动不便”命中 ART-AID-2 且不含 ART-SERVICE-3 | ✅ |
 | D8 | 检索排序在重复构建下确定 | `produces deterministic ordering across repeated queries and rebuilds` [search.test.ts](tests/search.test.ts) | 两个独立索引对同一查询返回相同顺序 | ✅ |
 | D9 | 撤下条目不可检索、替代条目可检索 | `reflects withdrawn articles removed and new articles searchable in v2` [search.test.ts](tests/search.test.ts) | v2 搜“行动不便”不返回 ART-AID-2，搜“上门服务”首条为 ART-SERVICE-3 | ✅ |
-| D10 | 阅读设置跨更新保留 | `preserves reading settings across a version update` [atomic-update.test.ts](tests/atomic-update.test.ts) | 设为 large/dark 后更新到 v2，设置不变；UI 测试验证写入 `data-font-size`/`data-theme` 并持久化 | ✅ |
-| D11 | REVISE/WITHDRAW/ADD 物化正确 | resolver [resolver.test.ts](tests/resolver.test.ts) | 7 个用例覆盖三类变更、基线不符、缺失替代条目、缺失主题等 | ✅ |
+| D10 | 阅读设置（含行距）跨更新保留 | `preserves reading settings across a version update` [atomic-update.test.ts](tests/atomic-update.test.ts) | 设为 large/dark/spacious 后更新到 v2，设置不变；UI 测试验证写入 `data-font-size`/`data-theme`/`data-line-spacing` 并持久化 | ✅ |
+| D11 | REVISE/WITHDRAW/ADD 物化正确 | resolver [resolver.test.ts](tests/resolver.test.ts) | 9 个用例覆盖三类变更、基线不符、缺失替代条目、缺失主题、替代链成环、自引用成环 | ✅ |
+
+### 3.7 设置 Schema 升级与原子迁移（第 3 轮）
+
+阅读设置从 v1（`fontSize`、`theme`）升级到 v2（新增 `lineSpacing`）。`PersistedSettings` 以 `{schemaVersion, settings}` 包装；`commit` 在切换包版本的**同一事务**内写入迁移后的设置，确保包版本与设置 schema 始终一致。
+
+| # | 场景 | 复现（测试名 / 文件） | 证据 | 结果 |
+|---|---|---|---|---|
+| S1 | v1 旧格式（无 wrapper）自动迁移 | `migrates legacy unwrapped v1 settings` [settings-migration.test.ts](tests/settings-migration.test.ts) | `{fontSize, theme}` → `{schemaVersion:1, settings:{...lineSpacing:'normal'}}` | ✅ |
+| S2 | 已包装 v1 设置保留 schemaVersion | `preserves schema version for already-wrapped v1 settings` [settings-migration.test.ts](tests/settings-migration.test.ts) | `migrateSettings` 不把 v1 强制提升为 v2，保留原始版本号以匹配活动包 | ✅ |
+| S3 | 无效枚举值被替换为默认值 | `sanitizes invalid enum values` / `partially sanitizes` [settings-migration.test.ts](tests/settings-migration.test.ts) | `fontSize:'huge'` 等非法值回退到默认；合法字段保留 | ✅ |
+| S4 | schema 不匹配时安全降级 | `falls back when schema version does not match` [settings-migration.test.ts](tests/settings-migration.test.ts)、`v2 settings stored but v1 pack active` [round3-integration.test.ts](tests/round3-integration.test.ts) | v2 设置 + v1 包（或反之）时返回 fallback，不跨版本混搭 | ✅ |
+| S5 | **提交事务同时写入包指针和设置** | `writes v2 settings and v2 pack pointer in the same commit transaction` [round3-integration.test.ts](tests/round3-integration.test.ts) | `commit(v2, base, migratedSettings)` 后 activeVersion=v2 且 settings.schemaVersion=2 | ✅ |
+| S6 | **事务中止后完整恢复旧包+旧设置** | `preserves v1 settings + v1 pack when commit is interrupted` [round3-integration.test.ts](tests/round3-integration.test.ts) | 手动 abort 事务后 activeVersion 仍为 v1、settings.schemaVersion 仍为 1，无混搭 | ✅ |
+| S7 | 重启清理暂存后设置不丢失 | `recovers to complete old pack + old settings after restart` [round3-integration.test.ts](tests/round3-integration.test.ts) | staged v2 被清理，v1 设置完整保留 | ✅ |
+| S8 | saveSettings 按活动包自动选择 schema | `saves v1 schema when v1 pack is active` / `saves v2 schema when v2 pack is active` [round3-integration.test.ts](tests/round3-integration.test.ts) | v1 包下保存为 schemaVersion=1，v2 包下保存为 schemaVersion=2 | ✅ |
+| S9 | 垃圾输入返回默认设置 | `returns default settings for null/garbage input` [settings-migration.test.ts](tests/settings-migration.test.ts) | null/undefined/string/number/array 均返回 CURRENT schema + 默认值 | ✅ |
+
+### 3.8 深链接迁移、替代链成环与降级（第 3 轮）
+
+`resolveArticleId` 遍历撤下替代链，支持多步跳转、成环检测和缺失链接检测。视图在焦点移至替代文章后通过 `aria-live=assertive` 区域宣布"内容已更新"。
+
+| # | 场景 | 复现（测试名 / 文件） | 证据 | 结果 |
+|---|---|---|---|---|
+| L1 | 直接访问存在文章 | `returns available for an existing article` [deep-link.test.ts](tests/deep-link.test.ts) | 返回 `{kind:'available', redirectedFrom:null}` | ✅ |
+| L2 | 撤下文章一跳到达替代 | `resolves a withdrawn article to its replacement` [deep-link.test.ts](tests/deep-link.test.ts) | ART-AID-2 → ART-SERVICE-3，redirectedFrom=ART-AID-2 | ✅ |
+| L3 | 多步替代链 | `follows a multi-step chain to find available article` [deep-link.test.ts](tests/deep-link.test.ts) | ART-OLD-1 → ART-MIDDLE → ART-AID-1（可用） | ✅ |
+| L4 | **替代链成环检测（运行时）** | `detects a cycle in the replacement chain` / `self-referencing cycle` [deep-link.test.ts](tests/deep-link.test.ts) | 返回 `{kind:'cycle', chain:[...]}`，视图渲染 `role="alert"` 降级消息 | ✅ |
+| L5 | **物化时拒绝成环包** | `rejects a replacement chain that forms a cycle` / `self-referencing withdrawal cycle` [resolver.test.ts](tests/resolver.test.ts) | `applyDelta` 抛 `PackValidationError`，成环包不可被安装 | ✅ |
+| L6 | 撤下但无替代文章 | `returns withdrawn when article was withdrawn without replacement` [deep-link.test.ts](tests/deep-link.test.ts) | 返回 `{kind:'withdrawn', replacementId:null}` | ✅ |
+| L7 | 链终止于缺失文章 | `returns missing when a chain leads to a missing article` [deep-link.test.ts](tests/deep-link.test.ts) | 返回 `{kind:'missing'}` | ✅ |
+| L8 | **UI 跳转后公告"内容已更新"并保留焦点** | `redirects a withdrawn article deep link to its replacement after update` [app.test.tsx](tests/app.test.tsx) | notice-region 含"内容已更新"+替代文章标题；`document.activeElement` 为替代文章 `<h1>` | ✅ |
+
+### 3.9 IndexedDB 配额耗尽与稳定降级（第 3 轮）
+
+设置保存采用乐观更新：先更新内存并通知视图，再异步写入 IndexedDB。配额不足时新设置仅在当前会话生效，已持久化的最后一次可用设置不被覆盖，并通过可见的 `degraded-banner`（`role="alert"`）公告。
+
+| # | 场景 | 复现（测试名 / 文件） | 证据 | 结果 |
+|---|---|---|---|---|
+| Q1 | **配额不足时保留上次已保存设置** | `keeps new settings in-memory but preserves last saved in DB` [round3-integration.test.ts](tests/round3-integration.test.ts) | 注入 `QuotaExceededStorageError`；内存为新设置、DB 仍为旧设置、`degradedNotice` 含"存储空间不足" | ✅ |
+| Q2 | 非配额错误回滚内存设置 | `rolls back in-memory settings on non-quota errors` [round3-integration.test.ts](tests/round3-integration.test.ts) | 普通 Error 时内存恢复为旧值，无 degradedNotice | ✅ |
+| Q3 | 暂存阶段配额不足保留完整旧包 | `keeps the complete old version when IndexedDB quota is exceeded during staging` [atomic-update.test.ts](tests/atomic-update.test.ts) | phase=failed，消息含"存储空间"，v1 完整可用 | ✅ |
 
 ## 4. 原生浏览器验收
 
@@ -121,14 +162,15 @@ npm run dev         # 原生浏览器验收：http://localhost:5173/
 2. **更新**：点击右上“检查更新”（刷新图标）→ 依次公告“正在下载/校验/归并/暂存/建索引/切换”，完成后出现“行动不便时的上门服务”，旧文“行动不便时的服务方式”消失，状态栏显示“已更新到版本 2026.09.01”，并出现“回滚到上一版本”。
 3. **撤下迁移**：在地址栏访问 `http://localhost:5173/#/article/ART-AID-2`（v2 已生效）→ 自动跳到 `#/article/ART-SERVICE-3` 并公告替代。
 4. **回滚**：点击“回滚到上一版本”→ 内容恢复为 v1；刷新页面后回滚按钮仍在（上一版本持久化在 IndexedDB）。
-5. **阅读设置**：点击齿轮图标进入设置，切换字号/主题，`<html>` 上 `data-font-size`/`data-theme` 立即变化并持久化。
-6. **离线**：DevTools→Network→Offline 后刷新，应用仍从 IndexedDB/捆绑种子正常启动；点击“检查更新”公告失败且仍显示旧版本，无新旧混排。
+5. **阅读设置**：点击齿轮图标进入设置，切换字号/主题/行距，`<html>` 上 `data-font-size`/`data-theme`/`data-line-spacing` 立即变化并持久化。
+6. **离线**：DevTools→Network→Offline 后刷新，应用仍从 IndexedDB/捆绑种子正常启动；点击"检查更新"公告失败且仍显示旧版本，无新旧混排。
+7. **撤下深链接迁移**：v2 生效后访问 `#/article/ART-AID-2`，自动跳到替代文章，断言区域公告"内容已更新"，焦点移至新文章标题。
 
 IndexedDB 结构（数据库名 `rights-pocket-guide`，版本 3）：
 
 - `packs`（keyPath `packageVersion`）：完整物化包；
 - `meta`（keyPath `key`）：`activeVersion`、`previousVersion`、`stagedVersion`；
-- `settings`（keyPath `key`）：阅读设置。
+- `settings`（keyPath `key`）：阅读设置，值为 `PersistedSettings {schemaVersion, settings}`，与活动包版本在同一提交事务中原子写入。
 
 更新流程中，新包先写入 `packs` 并登记 `stagedVersion`；提交在**单个 `readwrite` 事务**内读取 `activeVersion` 并与预期基础版本比较（乐观并发），仅当一致时才改 `activeVersion`/`previousVersion` 并删除 `stagedVersion`。因此：
 
